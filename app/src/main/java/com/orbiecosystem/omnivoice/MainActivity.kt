@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private lateinit var backend: Spinner
     private lateinit var steps: Spinner
     private lateinit var duration: Spinner
+    private lateinit var speed: Spinner
     private lateinit var consent: CheckBox
     private lateinit var refLabel: TextView
     private lateinit var generate: Button
@@ -59,6 +60,12 @@ class MainActivity : Activity() {
         refreshModelState()
     }
 
+    private fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    } catch (_: Throwable) {
+        "?"
+    }
+
     private fun buildUi(): View {
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
@@ -69,7 +76,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(text("ORBI OmniVoice Edge Lab", 26f, true))
-        root.addView(text("Android diagnostic v0.4 · POCO X7 Pro · backbone isolation", 14f, false))
+        root.addView(text("Android ${versionName()} · AUTO duration + speed + WAV cleanup", 14f, false))
         root.addView(space(10))
 
         root.addView(section("1 · Device Readiness"))
@@ -77,7 +84,7 @@ class MainActivity : Activity() {
         root.addView(deviceText)
         root.addView(space(12))
 
-        root.addView(section("2 · Model Pack (~1.2 GB)"))
+        root.addView(section("2 · Model Pack"))
         val dl = Button(this).apply {
             text = "Descargar / reanudar modelos"
             setOnClickListener { startDownload() }
@@ -147,21 +154,28 @@ class MainActivity : Activity() {
         root.addView(text("Recomendado: 5–8 s, voz limpia, sin música.", 12f, false))
         root.addView(space(12))
 
-        root.addView(section("4 · Synthesis / Backbone Diagnostic"))
+        root.addView(section("4 · Synthesis"))
         targetText = edit("Texto a sintetizar", 4).apply {
             setText("Hola, esta es una prueba.")
         }
         root.addView(targetText)
 
-        backend = spinner(listOf("CPU", "XNNPACK", "NNAPI")).apply { setSelection(1) }
+        backend = spinner(listOf("CPU", "XNNPACK", "NNAPI")).apply { setSelection(0) }
         root.addView(labelled("Backend", backend))
-        steps = spinner(listOf("4", "8", "16", "32")).apply { setSelection(2) }
-        root.addView(labelled("Inference steps", steps))
-        duration = spinner(listOf("1.0", "1.5", "2.0", "3.0", "5.0")).apply { setSelection(2) }
-        root.addView(labelled("Duración objetivo (s)", duration))
 
+        steps = spinner(listOf("4", "8", "16", "32")).apply { setSelection(3) }
+        root.addView(labelled("Inference steps", steps))
+
+        duration = spinner(listOf("AUTO", "1.0", "1.5", "2.0", "3.0", "5.0")).apply { setSelection(0) }
+        root.addView(labelled("Duración (AUTO recomendado; manual = avanzado)", duration))
+
+        speed = spinner(listOf("0.75", "0.90", "1.00", "1.10", "1.25")).apply { setSelection(2) }
+        root.addView(labelled("Velocidad (1.00 = normal; <1 lento; >1 rápido)", speed))
+        root.addView(text("En modo manual la duración fija reemplaza el control de velocidad, igual que OmniVoice upstream.", 12f, false))
+
+        root.addView(space(8))
         root.addView(text(
-            "Prueba A: TTS sin referencia. Aísla tokenizer + embeddings + LLM + audio heads + iterative unmasking + decoder.",
+            "Prueba A: TTS sin referencia. AUTO estima la cantidad de frames desde el texto.",
             12f, false
         ))
         generateAuto = Button(this).apply {
@@ -178,7 +192,7 @@ class MainActivity : Activity() {
 
         root.addView(space(8))
         root.addView(text(
-            "Prueba B: clonación. Añade el prefijo de códigos de la voz de referencia al mismo backbone.",
+            "Prueba B: clonación. AUTO usa tu transcripción + duración real de la referencia para estimar tu ritmo.",
             12f, false
         ))
         consent = CheckBox(this).apply {
@@ -212,11 +226,9 @@ class MainActivity : Activity() {
 
         root.addView(space(14))
         root.addView(text(
-            "Interpretación v0.4:\n" +
-                "• TEST CODEC claro + TTS sin referencia claro → problema específico del prefijo de clonación.\n" +
-                "• TEST CODEC claro + TTS sin referencia ininteligible → problema en tokenizer/backbone/unmasking.\n\n" +
-                "Licencia: este laboratorio no redistribuye pesos. Los descarga desde Hugging Face. " +
-                "Trata los pesos derivados de OmniVoice como I+D/no comercial hasta aclarar por separado su licencia comercial.",
+            "v0.6: duración AUTO inspirada en RuleDurationEstimator upstream, control speed y postproceso conservador. " +
+                "Las salidas finales se publican como WAV en Descargas/ORBI OmniVoice.\n\n" +
+                "Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
             12f, false
         ))
 
@@ -226,7 +238,7 @@ class MainActivity : Activity() {
     private fun showDevice() {
         val d = DeviceInfo.read(this)
         deviceText.text = d.pretty() +
-            "\nPerfil: POCO X7 Pro / Dimensity 8400-Ultra → XNNPACK. Codec ya validado; ahora aislamos el backbone."
+            "\nPerfil: POCO X7 Pro / Dimensity 8400-Ultra. Backbone bidireccional en CPU correctness path."
     }
 
     private fun refreshModelState() {
@@ -309,13 +321,7 @@ class MainActivity : Activity() {
             f.parentFile?.mkdirs()
             val saved = recorder.stopToWav(f)
             require(saved.isFile && saved.length() > 44) { "La grabación WAV no se creó correctamente" }
-            referenceFile = saved
-            val w = WavIO.readPcm16(saved)
-            val sec = w.samples.size.toFloat() / w.sampleRate
-            refLabel.text = "Referencia: ${saved.name} · %.1f s".format(sec)
-            playReference.isEnabled = true
-            roundTrip.isEnabled = ModelCatalog.isComplete(filesDir)
-            appendStatus("Referencia guardada · %.1f s · ${w.sampleRate} Hz".format(sec))
+            setReference(saved, "Referencia guardada")
         } catch (t: Throwable) {
             appendStatus("STOP REC ERROR: ${t.message}")
         } finally {
@@ -323,6 +329,16 @@ class MainActivity : Activity() {
             recButton.isEnabled = true
             stopButton.isEnabled = false
         }
+    }
+
+    private fun setReference(file: File, message: String) {
+        referenceFile = file
+        val w = WavIO.readPcm16(file)
+        val sec = w.samples.size.toFloat() / w.sampleRate
+        refLabel.text = "Referencia: ${file.name} · %.1f s".format(sec)
+        playReference.isEnabled = true
+        roundTrip.isEnabled = ModelCatalog.isComplete(filesDir)
+        appendStatus("$message · %.1f s · ${w.sampleRate} Hz".format(sec))
     }
 
     override fun onRequestPermissionsResult(
@@ -361,8 +377,8 @@ class MainActivity : Activity() {
                 f.outputStream().use { input.copyTo(it) }
             }
             val w = WavIO.readPcm16(f)
-            referenceFile = f
             runOnUiThread {
+                referenceFile = f
                 val sec = w.samples.size.toFloat() / w.sampleRate
                 refLabel.text = "Referencia: ${f.name} · %.1f s".format(sec)
                 playReference.isEnabled = true
@@ -419,6 +435,47 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun selectedManualSeconds(): Float? {
+        val value = duration.selectedItem.toString()
+        return if (value == "AUTO") null else value.toFloat()
+    }
+
+    private fun selectedSpeed(): Float = speed.selectedItem.toString().toFloat()
+
+    private fun estimateAuto(target: String): RuleDurationEstimator.Estimate =
+        RuleDurationEstimator.estimate(
+            targetText = target,
+            speed = selectedSpeed(),
+            manualSeconds = selectedManualSeconds()
+        )
+
+    private fun estimateClone(target: String, refTextValue: String, ref: File): RuleDurationEstimator.Estimate {
+        val w = WavIO.readPcm16(ref)
+        val seconds = w.samples.size.toFloat() / w.sampleRate
+        val approximateRefFrames = (seconds * RuleDurationEstimator.FRAME_RATE).toInt().coerceAtLeast(1)
+        return RuleDurationEstimator.estimate(
+            targetText = target,
+            referenceText = refTextValue,
+            referenceFrames = approximateRefFrames,
+            speed = selectedSpeed(),
+            manualSeconds = selectedManualSeconds()
+        )
+    }
+
+    private fun postProcess(raw: File, finalFile: File): Float {
+        val wav = WavIO.readPcm16(raw)
+        val clean = AudioPostProcessor.process(wav.samples, wav.sampleRate)
+        WavIO.writePcm16(finalFile, clean, wav.sampleRate)
+        raw.delete()
+        return clean.size.toFloat() / wav.sampleRate
+    }
+
+    private fun generationModeLabel(estimate: RuleDurationEstimator.Estimate): String {
+        val speedLabel = if (estimate.source == "MANUAL") "speed=IGNORED" else "speed=${selectedSpeed()}x"
+        val clamp = if (estimate.frames != estimate.unclampedFrames) " · clamp ${estimate.unclampedFrames}→${estimate.frames}" else ""
+        return "${estimate.source} · ${estimate.frames} frames · %.2fs · $speedLabel$clamp".format(estimate.seconds)
+    }
+
     private fun generateAutoVoice() {
         if (!ModelCatalog.isComplete(filesDir)) {
             toast("Primero descarga el Model Pack.")
@@ -432,14 +489,16 @@ class MainActivity : Activity() {
 
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
-        val secs = duration.selectedItem.toString().toFloat()
-        val out = File(filesDir, "outputs/auto_voice_${System.currentTimeMillis()}.wav")
-        out.parentFile?.mkdirs()
-        autoVoiceFile = out
+        val estimate = estimateAuto(target)
+        val stamp = System.currentTimeMillis()
+        val raw = File(filesDir, "outputs/raw_auto_voice_$stamp.wav")
+        val finalOut = File(filesDir, "outputs/auto_voice_$stamp.wav")
+        raw.parentFile?.mkdirs()
+        autoVoiceFile = null
 
         setInferenceButtons(false)
         playAuto.isEnabled = false
-        appendStatus("AUTO START · $selectedBackend · $nSteps steps · ${secs}s · SIN referencia")
+        appendStatus("AUTO START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         work.execute {
             try {
@@ -447,7 +506,9 @@ class MainActivity : Activity() {
                 engine = OmniVoiceEngine(filesDir, selectedBackend) { s ->
                     runOnUiThread { appendStatus(s) }
                 }
-                val stats = engine!!.generateAutoVoice(target, nSteps, secs, out)
+                val stats = engine!!.generateAutoVoice(target, nSteps, estimate.seconds, raw)
+                val cleanSeconds = postProcess(raw, finalOut)
+                autoVoiceFile = finalOut
                 runOnUiThread {
                     setInferenceButtons(true)
                     playAuto.isEnabled = true
@@ -458,10 +519,12 @@ class MainActivity : Activity() {
                             "generation=${stats.generationMs} ms\n" +
                             "decode=${stats.decodeMs} ms\n" +
                             "total=${stats.totalMs} ms\n" +
-                            "audio=%.2f s".format(stats.outputSeconds)
+                            "raw=%.2f s · clean=%.2f s\n".format(stats.outputSeconds, cleanSeconds) +
+                            "WAV público: Descargas/ORBI OmniVoice/${finalOut.name.replaceFirst("auto_voice_", "ORBI_TTS_")}" 
                     )
                 }
             } catch (t: Throwable) {
+                raw.delete()
                 runOnUiThread {
                     setInferenceButtons(true)
                     appendStatus("AUTO INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
@@ -489,16 +552,23 @@ class MainActivity : Activity() {
             toast("Escribe la transcripción exacta de la referencia.")
             return
         }
+        if (target.isBlank()) {
+            toast("Escribe el texto a sintetizar.")
+            return
+        }
 
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
-        val secs = duration.selectedItem.toString().toFloat()
-        outputFile = File(filesDir, "outputs/orbi_omnivoice_${System.currentTimeMillis()}.wav")
-        outputFile!!.parentFile?.mkdirs()
+        val estimate = estimateClone(target, refTx, ref)
+        val stamp = System.currentTimeMillis()
+        val raw = File(filesDir, "outputs/raw_orbi_omnivoice_$stamp.wav")
+        val finalOut = File(filesDir, "outputs/orbi_omnivoice_$stamp.wav")
+        raw.parentFile?.mkdirs()
+        outputFile = null
 
         setInferenceButtons(false)
         play.isEnabled = false
-        appendStatus("CLONE START · $selectedBackend · $nSteps steps · ${secs}s")
+        appendStatus("CLONE START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         work.execute {
             try {
@@ -506,7 +576,9 @@ class MainActivity : Activity() {
                 engine = OmniVoiceEngine(filesDir, selectedBackend) { s ->
                     runOnUiThread { appendStatus(s) }
                 }
-                val stats = engine!!.generate(ref, refTx, target, nSteps, secs, outputFile!!)
+                val stats = engine!!.generate(ref, refTx, target, nSteps, estimate.seconds, raw)
+                val cleanSeconds = postProcess(raw, finalOut)
+                outputFile = finalOut
                 runOnUiThread {
                     setInferenceButtons(true)
                     play.isEnabled = true
@@ -518,10 +590,12 @@ class MainActivity : Activity() {
                             "generation=${stats.generationMs} ms\n" +
                             "decode=${stats.decodeMs} ms\n" +
                             "total=${stats.totalMs} ms\n" +
-                            "audio=%.2f s".format(stats.outputSeconds)
+                            "raw=%.2f s · clean=%.2f s\n".format(stats.outputSeconds, cleanSeconds) +
+                            "WAV público: Descargas/ORBI OmniVoice/${finalOut.name.replaceFirst("orbi_omnivoice_", "ORBI_CLONE_")}" 
                     )
                 }
             } catch (t: Throwable) {
+                raw.delete()
                 runOnUiThread {
                     setInferenceButtons(true)
                     appendStatus("CLONE INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
@@ -547,7 +621,7 @@ class MainActivity : Activity() {
 
     private fun appendStatus(s: String) {
         val lines = (status.text.toString() + "\n" + s).lines()
-        status.text = lines.takeLast(90).joinToString("\n")
+        status.text = lines.takeLast(100).joinToString("\n")
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()

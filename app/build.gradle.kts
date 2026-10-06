@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.5.2-public-wav-export"
+        versionCode = 9
+        versionName = "0.6.0-auto-duration-speed"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
