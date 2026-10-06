@@ -106,7 +106,7 @@ class OmniVoiceEngine(
         val bidir = ModelCatalog.bidirBackboneDir(filesDir)
         val h = ModelCatalog.higgsDir(filesDir)
 
-        log("Cargando sesiones ONNX v0.5…")
+        log("Cargando sesiones ONNX v0.5.1…")
         embeddings = env.createSession(File(b, "audio_embeddings_encoder.onnx").absolutePath, options)
         llm = env.createSession(File(bidir, "llm_decoder.onnx").absolutePath, llmOptions)
         heads = env.createSession(File(b, "audio_heads_decoder.onnx").absolutePath, options)
@@ -118,6 +118,7 @@ class OmniVoiceEngine(
 
         val llmInputs = llm!!.inputNames.sorted().joinToString(",")
         log("Sesiones READY · LLM bidireccional inputs=[$llmInputs]")
+        log("CFG compatibility: ramas cond/uncond serializadas como batch=1")
     }
 
     fun generate(
@@ -462,6 +463,12 @@ class OmniVoiceEngine(
         }
     }
 
+    /**
+     * The corrected bidirectional INT4 export currently exposes a fixed batch dimension of 1.
+     * CFG needs two logical branches (conditional + unconditional), so execute them sequentially
+     * and concatenate the logits back into the same logical [2,8,S,1025] layout expected by the
+     * diffusion loop. This keeps the model contract valid without disabling classifier-free guidance.
+     */
     private fun runBackboneBatch(
         ids: LongArray,
         audioMask: BooleanArray,
@@ -469,8 +476,59 @@ class OmniVoiceEngine(
         batch: Int,
         seq: Int
     ): FloatArray {
-        val idTensor = longTensor(ids, longArrayOf(batch.toLong(), NUM_CODEBOOKS.toLong(), seq.toLong()))
-        val audioTensor = boolTensor(audioMask, longArrayOf(batch.toLong(), seq.toLong()))
+        require(batch >= 1)
+        val idsPerBranch = NUM_CODEBOOKS * seq
+        val audioPerBranch = seq
+        val attentionPerBranch = seq * seq
+        val logitsPerBranch = NUM_CODEBOOKS * seq * AUDIO_VOCAB
+
+        require(ids.size == batch * idsPerBranch) { "ids CFG shape inválido" }
+        require(audioMask.size == batch * audioPerBranch) { "audioMask CFG shape inválido" }
+        require(attentionMask.size == batch * attentionPerBranch) { "attentionMask CFG shape inválido" }
+
+        val merged = FloatArray(batch * logitsPerBranch)
+        for (branch in 0 until batch) {
+            val branchIds = ids.copyOfRange(
+                branch * idsPerBranch,
+                (branch + 1) * idsPerBranch
+            )
+            val branchAudio = audioMask.copyOfRange(
+                branch * audioPerBranch,
+                (branch + 1) * audioPerBranch
+            )
+            val branchAttention = attentionMask.copyOfRange(
+                branch * attentionPerBranch,
+                (branch + 1) * attentionPerBranch
+            )
+
+            val branchLogits = runBackboneSingle(
+                branchIds,
+                branchAudio,
+                branchAttention,
+                seq
+            )
+            require(branchLogits.size == logitsPerBranch) {
+                "logits branch=$branch tamaño=${branchLogits.size}, esperado=$logitsPerBranch"
+            }
+            System.arraycopy(
+                branchLogits,
+                0,
+                merged,
+                branch * logitsPerBranch,
+                logitsPerBranch
+            )
+        }
+        return merged
+    }
+
+    private fun runBackboneSingle(
+        ids: LongArray,
+        audioMask: BooleanArray,
+        attentionMask: BooleanArray,
+        seq: Int
+    ): FloatArray {
+        val idTensor = longTensor(ids, longArrayOf(1, NUM_CODEBOOKS.toLong(), seq.toLong()))
+        val audioTensor = boolTensor(audioMask, longArrayOf(1, seq.toLong()))
         val embedsData: FloatArray
 
         try {
@@ -485,10 +543,14 @@ class OmniVoiceEngine(
             audioTensor.close()
         }
 
+        require(embedsData.size == seq * HIDDEN) {
+            "inputs_embeds tamaño=${embedsData.size}, esperado=${seq * HIDDEN}"
+        }
+
         val feed = LinkedHashMap<String, OnnxTensor>()
         feed["inputs_embeds"] = floatTensor(
             embedsData,
-            longArrayOf(batch.toLong(), seq.toLong(), HIDDEN.toLong())
+            longArrayOf(1, seq.toLong(), HIDDEN.toLong())
         )
 
         val names = llm!!.inputNames
@@ -497,7 +559,7 @@ class OmniVoiceEngine(
         }
         feed["attention_mask"] = boolTensor(
             attentionMask,
-            longArrayOf(batch.toLong(), 1, seq.toLong(), seq.toLong())
+            longArrayOf(1, 1, seq.toLong(), seq.toLong())
         )
 
         val hidden: FloatArray
@@ -512,9 +574,13 @@ class OmniVoiceEngine(
             feed.values.forEach { it.close() }
         }
 
+        require(hidden.size == seq * HIDDEN) {
+            "hidden_states tamaño=${hidden.size}, esperado=${seq * HIDDEN}"
+        }
+
         val hTensor = floatTensor(
             hidden,
-            longArrayOf(batch.toLong(), seq.toLong(), HIDDEN.toLong())
+            longArrayOf(1, seq.toLong(), HIDDEN.toLong())
         )
         try {
             heads!!.run(mapOf("hidden_states" to hTensor)).use { r ->
