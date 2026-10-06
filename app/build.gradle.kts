@@ -11,8 +11,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-poco-edge-lab"
+        versionCode = 3
+        versionName = "0.3.0-poco-diagnostics"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
