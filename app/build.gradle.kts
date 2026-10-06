@@ -1,6 +1,17 @@
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val stableDebugKeystore = layout.buildDirectory.file("orbi-debug.keystore").get().asFile
+val stableDebugKeystoreB64 = rootProject.file("ci/orbi-debug.keystore.b64")
+if (stableDebugKeystoreB64.isFile) {
+    stableDebugKeystore.parentFile.mkdirs()
+    stableDebugKeystore.writeBytes(
+        Base64.getMimeDecoder().decode(stableDebugKeystoreB64.readText().trim())
+    )
 }
 
 android {
@@ -11,15 +22,27 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0-poco-diagnostics"
+        versionCode = 4
+        versionName = "0.3.1-poco-diagnostics"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
     }
 
+    signingConfigs {
+        create("orbiStableDebug") {
+            storeFile = stableDebugKeystore
+            storePassword = "android"
+            keyAlias = "orbidebug"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("orbiStableDebug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
