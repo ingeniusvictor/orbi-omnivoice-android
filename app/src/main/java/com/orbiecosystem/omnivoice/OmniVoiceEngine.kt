@@ -10,7 +10,9 @@ import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import kotlin.math.ceil
 import kotlin.math.exp
+import kotlin.math.ln
 import kotlin.math.max
+import kotlin.random.Random
 import kotlin.system.measureTimeMillis
 
 enum class Backend { CPU, XNNPACK, NNAPI }
@@ -37,20 +39,26 @@ class OmniVoiceEngine(
     companion object {
         private const val NUM_CODEBOOKS = 8
         private const val AUDIO_VOCAB_REAL = 1024
+        private const val AUDIO_VOCAB = 1025
         private const val AUDIO_MASK_ID = 1024L
         private const val HIDDEN = 1024
         private const val SR24 = 24_000
         private const val SR16 = 16_000
-        private const val KV_HEADS = 8
-        private const val HEAD_DIM = 128
-        private val CB_WEIGHTS = floatArrayOf(8f, 8f, 6f, 6f, 4f, 4f, 2f, 2f).let { a ->
-            val s = a.sum()
-            FloatArray(a.size) { a[it] / s }
-        }
+
+        // Upstream OmniVoice generation defaults.
+        private const val GUIDANCE_SCALE = 2.0f
+        private const val T_SHIFT = 0.1f
+        private const val LAYER_PENALTY = 5.0f
+        private const val POSITION_TEMPERATURE = 5.0f
     }
 
     private val env = OrtEnvironment.getEnvironment()
+
+    // Selected EP is useful for embeddings/heads/Higgs. The corrected diffusion LLM is kept on
+    // the CPU EP deliberately: correctness first, and its bidirectional 4-D mask is the critical path.
     private val options = OrtSession.SessionOptions()
+    private val llmOptions = OrtSession.SessionOptions()
+
     private var embeddings: OrtSession? = null
     private var llm: OrtSession? = null
     private var heads: OrtSession? = null
@@ -61,14 +69,18 @@ class OmniVoiceEngine(
     private var tokenizer: Tokenizer? = null
 
     init {
-        options.setIntraOpNumThreads(max(2, Runtime.getRuntime().availableProcessors().coerceAtMost(8)))
+        val threads = max(2, Runtime.getRuntime().availableProcessors().coerceAtMost(8))
+        options.setIntraOpNumThreads(threads)
         options.setInterOpNumThreads(1)
+        llmOptions.setIntraOpNumThreads(threads)
+        llmOptions.setInterOpNumThreads(1)
+
         when (backend) {
             Backend.CPU -> Unit
             Backend.XNNPACK -> {
                 try {
                     options.addXnnpack(mapOf("intra_op_num_threads" to "4"))
-                    log("Execution Provider: XNNPACK + CPU fallback")
+                    log("Execution Provider auxiliar: XNNPACK + CPU fallback")
                 } catch (t: Throwable) {
                     log("XNNPACK no disponible (${t.message}); CPU fallback")
                 }
@@ -76,12 +88,13 @@ class OmniVoiceEngine(
             Backend.NNAPI -> {
                 try {
                     options.addNnapi()
-                    log("Execution Provider: NNAPI + CPU fallback")
+                    log("Execution Provider auxiliar: NNAPI + CPU fallback")
                 } catch (t: Throwable) {
                     log("NNAPI no disponible (${t.message}); CPU fallback")
                 }
             }
         }
+        log("Backbone bidireccional: CPUExecutionProvider (correctness path)")
     }
 
     private fun load() {
@@ -90,17 +103,21 @@ class OmniVoiceEngine(
             "Faltan modelos: ${ModelCatalog.describeMissing(filesDir).joinToString()}"
         }
         val b = ModelCatalog.backboneDir(filesDir)
+        val bidir = ModelCatalog.bidirBackboneDir(filesDir)
         val h = ModelCatalog.higgsDir(filesDir)
-        log("Cargando sesiones ONNX…")
+
+        log("Cargando sesiones ONNX v0.5…")
         embeddings = env.createSession(File(b, "audio_embeddings_encoder.onnx").absolutePath, options)
-        llm = env.createSession(File(b, "llm_decoder.onnx").absolutePath, options)
+        llm = env.createSession(File(bidir, "llm_decoder.onnx").absolutePath, llmOptions)
         heads = env.createSession(File(b, "audio_heads_decoder.onnx").absolutePath, options)
         acoustic = env.createSession(File(h, "acoustic_encoder.onnx").absolutePath, options)
         semantic = env.createSession(File(h, "semantic_encoder.onnx").absolutePath, options)
         quantizer = env.createSession(File(h, "quantizer_encoder.onnx").absolutePath, options)
         decoder = env.createSession(File(h, "higgs_decoder.onnx").absolutePath, options)
         tokenizer = Tokenizer.fromFile(File(b, "tokenizer.json").absolutePath)
-        log("Sesiones ONNX + tokenizer: READY")
+
+        val llmInputs = llm!!.inputNames.sorted().joinToString(",")
+        log("Sesiones READY · LLM bidireccional inputs=[$llmInputs]")
     }
 
     fun generate(
@@ -131,20 +148,24 @@ class OmniVoiceEngine(
         var prefix = LongArray(0)
         var refFrames = 0
         val refMs = measureTimeMillis {
-            log("Codificando referencia (24k + 16k)…")
+            log("Codificando referencia Higgs (24k + 16k)…")
             val p = higgsEncode(wav24, wav16)
             prefix = p.first
             refFrames = p.second
         }
         log("Referencia: $refFrames frames (≈ %.2f s), ${refMs} ms".format(refFrames / 25f))
 
-        val textIds = tokenize(targetText)
-        log("Texto: ${textIds.size} tokens · ids=${textIds.take(12).joinToString(",")}")
-
         val genFrames = max(20, (outputSeconds * 25f).toInt())
         var codes = LongArray(0)
         val genMs = measureTimeMillis {
-            codes = iterativeUnmask(textIds, prefix, refFrames, genFrames, steps)
+            codes = diffusionGenerate(
+                targetText = targetText,
+                referenceText = referenceText,
+                prefixCodes = prefix,
+                refFrames = refFrames,
+                genFrames = genFrames,
+                steps = steps
+            )
         }
 
         var waveform = FloatArray(0)
@@ -161,12 +182,6 @@ class OmniVoiceEngine(
         )
     }
 
-    /**
-     * Diagnostic path that intentionally omits the reference prefix.
-     * If this path is intelligible while voice cloning is not, the failure is in
-     * reference-prefix conditioning. If this path is also unintelligible, the
-     * problem is upstream of the codec: tokenization/backbone/unmasking.
-     */
     fun generateAutoVoice(
         targetText: String,
         steps: Int,
@@ -179,13 +194,18 @@ class OmniVoiceEngine(
 
         val totalStart = System.currentTimeMillis()
         load()
-        val textIds = tokenize(targetText)
-        log("AUTO-VOICE · ${textIds.size} tokens · ids=${textIds.take(12).joinToString(",")}")
 
         val genFrames = max(20, (outputSeconds * 25f).toInt())
         var codes = LongArray(0)
         val genMs = measureTimeMillis {
-            codes = iterativeUnmask(textIds, LongArray(0), 0, genFrames, steps)
+            codes = diffusionGenerate(
+                targetText = targetText,
+                referenceText = null,
+                prefixCodes = LongArray(0),
+                refFrames = 0,
+                genFrames = genFrames,
+                steps = steps
+            )
         }
 
         var waveform = FloatArray(0)
@@ -202,8 +222,203 @@ class OmniVoiceEngine(
         )
     }
 
-    private fun tokenize(text: String): LongArray =
-        tokenizer!!.encode(text, true).ids.map { it.toLong() }.toLongArray()
+    private fun encodeText(text: String): LongArray =
+        tokenizer!!.encode(text, false).ids.map { it.toLong() }.toLongArray()
+
+    /**
+     * Faithful Android port of OmniVoice's masked-diffusion decoding contract:
+     * - prompt framing with language/instruction/text markers;
+     * - reference text is concatenated before target text for cloning;
+     * - reference audio codes are marked as audio embeddings;
+     * - classifier-free guidance against an unconditional audio-grid branch;
+     * - per-(codebook,frame) top-k reveal schedule using t_shift=0.1;
+     * - layer penalty and Gumbel position sampling.
+     */
+    private fun diffusionGenerate(
+        targetText: String,
+        referenceText: String?,
+        prefixCodes: LongArray,
+        refFrames: Int,
+        genFrames: Int,
+        steps: Int
+    ): LongArray {
+        val cloning = refFrames > 0
+        require(!cloning || prefixCodes.size == NUM_CODEBOOKS * refFrames) {
+            "Prefix Higgs inválido: ${prefixCodes.size} valores para $refFrames frames"
+        }
+
+        var styleText = ""
+        if (cloning) styleText += "<|denoise|>"
+        styleText += "<|lang_start|>None<|lang_end|>"
+        styleText += "<|instruct_start|>None<|instruct_end|>"
+
+        val fullText = if (cloning && !referenceText.isNullOrBlank()) {
+            referenceText.trim() + " " + targetText.trim()
+        } else {
+            targetText.trim()
+        }.replace(Regex("[\\r\\n]+"), " ")
+            .replace(Regex("[ \\t]+"), " ")
+
+        val wrappedText = "<|text_start|>$fullText<|text_end|>"
+        val styleTokens = encodeText(styleText)
+        val textTokens = encodeText(wrappedText)
+        val promptTokens = LongArray(styleTokens.size + textTokens.size)
+        System.arraycopy(styleTokens, 0, promptTokens, 0, styleTokens.size)
+        System.arraycopy(textTokens, 0, promptTokens, styleTokens.size, textTokens.size)
+
+        val promptN = promptTokens.size
+        val condSeq = promptN + refFrames + genFrames
+        val condGenStart = promptN + refFrames
+        val condAudioStart = if (cloning) promptN else condGenStart
+        val batch = 2 // conditional + unconditional CFG branch
+
+        log(
+            "DIFFUSION · mode=${if (cloning) "clone" else "auto"} · prompt=$promptN tokens · " +
+                "ref=$refFrames · target=$genFrames · steps=$steps"
+        )
+        log("CFG=$GUIDANCE_SCALE · tShift=$T_SHIFT · layerPenalty=$LAYER_PENALTY · posTemp=$POSITION_TEMPERATURE")
+
+        // Static attention masks. Conditional sees the complete sequence bidirectionally.
+        // Unconditional sees only the target grid; padding positions self-attend only.
+        val attention = BooleanArray(batch * condSeq * condSeq)
+        fun attIndex(b: Int, q: Int, k: Int): Int = (b * condSeq + q) * condSeq + k
+        for (q in 0 until condSeq) {
+            for (k in 0 until condSeq) attention[attIndex(0, q, k)] = true
+        }
+        for (q in 0 until genFrames) {
+            for (k in 0 until genFrames) attention[attIndex(1, q, k)] = true
+        }
+        for (p in genFrames until condSeq) attention[attIndex(1, p, p)] = true
+
+        val audioMask = BooleanArray(batch * condSeq)
+        for (p in condAudioStart until condSeq) audioMask[p] = true
+        for (p in 0 until genFrames) audioMask[condSeq + p] = true
+
+        val tokens = LongArray(NUM_CODEBOOKS * genFrames) { AUDIO_MASK_ID }
+        val schedule = revealSchedule(genFrames * NUM_CODEBOOKS, steps)
+        var remaining = genFrames * NUM_CODEBOOKS
+
+        for (step in 0 until steps) {
+            val k = schedule[step].coerceAtMost(remaining)
+            if (k <= 0 || remaining <= 0) continue
+
+            log("Difusión ${step + 1}/$steps · reveal=$k · pendientes=$remaining")
+
+            val ids = LongArray(batch * NUM_CODEBOOKS * condSeq) { AUDIO_MASK_ID }
+            fun idIndex(b: Int, cb: Int, pos: Int): Int = ((b * NUM_CODEBOOKS + cb) * condSeq) + pos
+
+            for (cb in 0 until NUM_CODEBOOKS) {
+                for (i in promptTokens.indices) ids[idIndex(0, cb, i)] = promptTokens[i]
+                if (cloning) {
+                    for (i in 0 until refFrames) {
+                        ids[idIndex(0, cb, promptN + i)] = prefixCodes[cb * refFrames + i]
+                    }
+                }
+                for (p in 0 until genFrames) {
+                    val token = tokens[cb * genFrames + p]
+                    ids[idIndex(0, cb, condGenStart + p)] = token
+                    ids[idIndex(1, cb, p)] = token
+                }
+            }
+
+            val logits = runBackboneBatch(ids, audioMask, attention, batch, condSeq)
+            val candidates = ArrayList<SlotCandidate>(remaining)
+
+            for (cb in 0 until NUM_CODEBOOKS) {
+                for (p in 0 until genFrames) {
+                    val slot = cb * genFrames + p
+                    if (tokens[slot] != AUDIO_MASK_ID) continue
+
+                    val cBase = (((0 * NUM_CODEBOOKS + cb) * condSeq + condGenStart + p) * AUDIO_VOCAB)
+                    val uBase = (((1 * NUM_CODEBOOKS + cb) * condSeq + p) * AUDIO_VOCAB)
+
+                    val cNorm = logSumExp(logits, cBase, AUDIO_VOCAB)
+                    val uNorm = logSumExp(logits, uBase, AUDIO_VOCAB)
+
+                    var guidedMax = Float.NEGATIVE_INFINITY
+                    val guided = FloatArray(AUDIO_VOCAB)
+                    for (v in 0 until AUDIO_VOCAB) {
+                        val cLp = logits[cBase + v] - cNorm
+                        val uLp = logits[uBase + v] - uNorm
+                        val g = cLp + GUIDANCE_SCALE * (cLp - uLp)
+                        guided[v] = g
+                        if (g > guidedMax) guidedMax = g
+                    }
+
+                    var guidedSum = 0.0
+                    for (v in 0 until AUDIO_VOCAB) {
+                        guidedSum += exp((guided[v] - guidedMax).toDouble())
+                    }
+                    val guidedNorm = guidedMax + ln(guidedSum).toFloat()
+
+                    var bestToken = 0
+                    var bestScore = Float.NEGATIVE_INFINITY
+                    for (v in 0 until AUDIO_VOCAB_REAL) {
+                        val lp = guided[v] - guidedNorm
+                        if (lp > bestScore) {
+                            bestScore = lp
+                            bestToken = v
+                        }
+                    }
+
+                    var positionScore = bestScore - cb * LAYER_PENALTY
+                    if (POSITION_TEMPERATURE > 0f) {
+                        positionScore = positionScore / POSITION_TEMPERATURE + sampleGumbel()
+                    }
+                    candidates += SlotCandidate(slot, positionScore, bestToken)
+                }
+            }
+
+            candidates.sortByDescending { it.score }
+            val take = minOf(k, candidates.size)
+            for (i in 0 until take) {
+                val c = candidates[i]
+                tokens[c.slot] = c.token.toLong()
+            }
+            remaining -= take
+        }
+
+        require(tokens.none { it == AUDIO_MASK_ID }) {
+            "Difusión terminó con celdas MASK sin resolver ($remaining)"
+        }
+
+        log("DIFFUSION READY · ${NUM_CODEBOOKS * genFrames} celdas de audio resueltas")
+        return tokens
+    }
+
+    private data class SlotCandidate(val slot: Int, val score: Float, val token: Int)
+
+    private fun revealSchedule(totalMask: Int, steps: Int): IntArray {
+        val times = FloatArray(steps + 1)
+        for (i in 0..steps) {
+            val t = i.toFloat() / steps.toFloat()
+            times[i] = T_SHIFT * t / (1f + (T_SHIFT - 1f) * t)
+        }
+
+        var rem = totalMask
+        return IntArray(steps) { step ->
+            val n = if (step == steps - 1) {
+                rem
+            } else {
+                minOf(ceil(totalMask * (times[step + 1] - times[step]).toDouble()).toInt(), rem)
+            }
+            rem -= n
+            n
+        }
+    }
+
+    private fun sampleGumbel(): Float {
+        val u = Random.nextDouble().coerceIn(1e-10, 1.0 - 1e-10)
+        return (-ln(-ln(u))).toFloat()
+    }
+
+    private fun logSumExp(values: FloatArray, base: Int, count: Int): Float {
+        var m = Float.NEGATIVE_INFINITY
+        for (i in 0 until count) if (values[base + i] > m) m = values[base + i]
+        var sum = 0.0
+        for (i in 0 until count) sum += exp((values[base + i] - m).toDouble())
+        return m + ln(sum).toFloat()
+    }
 
     private fun higgsEncode(wav24: FloatArray, wav16: FloatArray): Pair<LongArray, Int> {
         val acousticOut = runFloat(
@@ -247,152 +462,60 @@ class OmniVoiceEngine(
         }
     }
 
-    private fun iterativeUnmask(
-        textTokens: LongArray,
-        prefixCodes: LongArray,
-        refFrames: Int,
-        genFrames: Int,
-        steps: Int
-    ): LongArray {
-        val textN = textTokens.size
-        val seq = textN + refFrames + genFrames
-        val genStart = textN + refFrames
-        val ids = LongArray(NUM_CODEBOOKS * seq)
-
-        for (cb in 0 until NUM_CODEBOOKS) {
-            val row = cb * seq
-            for (i in textTokens.indices) ids[row + i] = textTokens[i]
-            for (i in 0 until refFrames) ids[row + textN + i] = prefixCodes[cb * refFrames + i]
-            for (i in 0 until genFrames) ids[row + genStart + i] = AUDIO_MASK_ID
-        }
-
-        val audioMask = BooleanArray(seq)
-        for (i in genStart until seq) audioMask[i] = true
-
-        var masked = genFrames
-        var lastLogits: FloatArray? = null
-
-        for (step in 0 until steps) {
-            if (masked == 0) break
-            log("Inferencia ${step + 1}/$steps · $masked frames pendientes")
-            val logits = runBackbone(ids, audioMask, seq)
-            lastLogits = logits
-
-            val positions = IntArray(masked)
-            var pi = 0
-            for (p in 0 until genFrames) {
-                if (ids[genStart + p] == AUDIO_MASK_ID) positions[pi++] = p
-            }
-
-            val confidence = FloatArray(genFrames) { Float.NEGATIVE_INFINITY }
-            val argmax = Array(NUM_CODEBOOKS) { IntArray(genFrames) }
-
-            for (p in positions) {
-                var weighted = 0f
-                val seqPos = genStart + p
-                for (cb in 0 until NUM_CODEBOOKS) {
-                    val base = ((cb * seq + seqPos) * 1025)
-                    var maxLogit = Float.NEGATIVE_INFINITY
-                    var best = 0
-                    for (v in 0 until AUDIO_VOCAB_REAL) {
-                        val x = logits[base + v]
-                        if (x > maxLogit) { maxLogit = x; best = v }
-                    }
-                    var sum = 0.0
-                    for (v in 0 until AUDIO_VOCAB_REAL) {
-                        sum += exp((logits[base + v] - maxLogit).toDouble())
-                    }
-                    val maxProb = (1.0 / sum).toFloat()
-                    weighted += maxProb * CB_WEIGHTS[cb]
-                    argmax[cb][p] = best
-                }
-                confidence[p] = weighted
-            }
-
-            val remainingSteps = max(1, steps - step)
-            val nThis = max(1, ceil(positions.size.toDouble() / remainingSteps).toInt())
-            val chosen = positions.toList()
-                .sortedByDescending { confidence[it] }
-                .take(nThis)
-
-            for (p in chosen) {
-                val seqPos = genStart + p
-                for (cb in 0 until NUM_CODEBOOKS) {
-                    ids[cb * seq + seqPos] = argmax[cb][p].toLong()
-                }
-            }
-            masked -= chosen.size
-        }
-
-        if (masked > 0) {
-            log("Safety fill: $masked frames")
-            val logits = lastLogits ?: runBackbone(ids, audioMask, seq)
-            for (p in 0 until genFrames) {
-                if (ids[genStart + p] != AUDIO_MASK_ID) continue
-                val seqPos = genStart + p
-                for (cb in 0 until NUM_CODEBOOKS) {
-                    val base = ((cb * seq + seqPos) * 1025)
-                    var best = 0
-                    var maxLogit = Float.NEGATIVE_INFINITY
-                    for (v in 0 until AUDIO_VOCAB_REAL) {
-                        val x = logits[base + v]
-                        if (x > maxLogit) { maxLogit = x; best = v }
-                    }
-                    ids[cb * seq + seqPos] = best.toLong()
-                }
-            }
-        }
-
-        val out = LongArray(NUM_CODEBOOKS * genFrames)
-        for (cb in 0 until NUM_CODEBOOKS) {
-            System.arraycopy(ids, cb * seq + genStart, out, cb * genFrames, genFrames)
-        }
-        return out
-    }
-
-    private fun runBackbone(ids: LongArray, audioMask: BooleanArray, seq: Int): FloatArray {
-        val idTensor = longTensor(ids, longArrayOf(1, NUM_CODEBOOKS.toLong(), seq.toLong()))
-        val maskTensor = boolTensor(audioMask, longArrayOf(1, seq.toLong()))
+    private fun runBackboneBatch(
+        ids: LongArray,
+        audioMask: BooleanArray,
+        attentionMask: BooleanArray,
+        batch: Int,
+        seq: Int
+    ): FloatArray {
+        val idTensor = longTensor(ids, longArrayOf(batch.toLong(), NUM_CODEBOOKS.toLong(), seq.toLong()))
+        val audioTensor = boolTensor(audioMask, longArrayOf(batch.toLong(), seq.toLong()))
         val embedsData: FloatArray
 
         try {
-            embeddings!!.run(mapOf("input_ids" to idTensor, "audio_mask" to maskTensor)).use { r ->
+            embeddings!!.run(mapOf("input_ids" to idTensor, "audio_mask" to audioTensor)).use { r ->
                 val t = r.get("inputs_embeds").orElseThrow() as OnnxTensor
                 val b = t.floatBuffer ?: error("inputs_embeds dtype no convertible a float")
-                embedsData = FloatArray(b.remaining()); b.get(embedsData)
+                embedsData = FloatArray(b.remaining())
+                b.get(embedsData)
             }
         } finally {
-            idTensor.close(); maskTensor.close()
+            idTensor.close()
+            audioTensor.close()
         }
 
         val feed = LinkedHashMap<String, OnnxTensor>()
-        feed["inputs_embeds"] = floatTensor(embedsData, longArrayOf(1, seq.toLong(), HIDDEN.toLong()))
+        feed["inputs_embeds"] = floatTensor(
+            embedsData,
+            longArrayOf(batch.toLong(), seq.toLong(), HIDDEN.toLong())
+        )
 
         val names = llm!!.inputNames
-        if ("attention_mask" in names) {
-            feed["attention_mask"] = longTensor(LongArray(seq) { 1L }, longArrayOf(1, seq.toLong()))
+        require("attention_mask" in names) {
+            "El backbone cargado no es el bidireccional esperado: falta attention_mask 4-D"
         }
-        if ("position_ids" in names) {
-            feed["position_ids"] = longTensor(LongArray(seq) { it.toLong() }, longArrayOf(1, seq.toLong()))
-        }
-        for (name in names) {
-            if ("past" in name) {
-                feed[name] = floatTensor(FloatArray(0), longArrayOf(1, KV_HEADS.toLong(), 0, HEAD_DIM.toLong()))
-            }
-        }
+        feed["attention_mask"] = boolTensor(
+            attentionMask,
+            longArrayOf(batch.toLong(), 1, seq.toLong(), seq.toLong())
+        )
 
         val hidden: FloatArray
         try {
             llm!!.run(feed).use { r ->
                 val t = r.get("hidden_states").orElseThrow() as OnnxTensor
                 val b = t.floatBuffer ?: error("hidden_states dtype no convertible a float")
-                hidden = FloatArray(b.remaining()); b.get(hidden)
+                hidden = FloatArray(b.remaining())
+                b.get(hidden)
             }
         } finally {
             feed.values.forEach { it.close() }
         }
 
-        val hTensor = floatTensor(hidden, longArrayOf(1, seq.toLong(), HIDDEN.toLong()))
+        val hTensor = floatTensor(
+            hidden,
+            longArrayOf(batch.toLong(), seq.toLong(), HIDDEN.toLong())
+        )
         try {
             heads!!.run(mapOf("hidden_states" to hTensor)).use { r ->
                 val t = r.get("logits").orElseThrow() as OnnxTensor
@@ -447,14 +570,16 @@ class OmniVoiceEngine(
     private fun floatTensor(data: FloatArray, shape: LongArray): OnnxTensor {
         val bb = ByteBuffer.allocateDirect(data.size * 4).order(ByteOrder.nativeOrder())
         val fb: FloatBuffer = bb.asFloatBuffer()
-        fb.put(data); fb.flip()
+        fb.put(data)
+        fb.flip()
         return OnnxTensor.createTensor(env, fb, shape)
     }
 
     private fun longTensor(data: LongArray, shape: LongArray): OnnxTensor {
         val bb = ByteBuffer.allocateDirect(data.size * 8).order(ByteOrder.nativeOrder())
         val lb: LongBuffer = bb.asLongBuffer()
-        lb.put(data); lb.flip()
+        lb.put(data)
+        lb.flip()
         return OnnxTensor.createTensor(env, lb, shape)
     }
 
@@ -470,7 +595,13 @@ class OmniVoiceEngine(
             try { it?.close() } catch (_: Throwable) {}
         }
         try { options.close() } catch (_: Throwable) {}
-        embeddings = null; llm = null; heads = null
-        acoustic = null; semantic = null; quantizer = null; decoder = null
+        try { llmOptions.close() } catch (_: Throwable) {}
+        embeddings = null
+        llm = null
+        heads = null
+        acoustic = null
+        semantic = null
+        quantizer = null
+        decoder = null
     }
 }
