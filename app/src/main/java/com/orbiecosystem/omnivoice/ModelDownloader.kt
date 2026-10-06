@@ -63,7 +63,7 @@ class ModelDownloader(
             conn.inputStream.buffered(1024 * 1024).use { input ->
                 val buffer = ByteArray(1024 * 1024)
                 var downloaded = existing
-                var lastPct = -1
+                var lastBucket = -1
                 while (true) {
                     if (cancelled.get()) error("Descarga cancelada")
                     val n = input.read(buffer)
@@ -72,10 +72,12 @@ class ModelDownloader(
                     downloaded += n
                     if (expectedTotal > 0) {
                         val filePct = ((downloaded * 100) / expectedTotal).toInt().coerceIn(0, 100)
-                        if (filePct != lastPct) {
-                            lastPct = filePct
-                            val global = ((index * 100) + filePct) / totalFiles
-                            onProgress(global.coerceIn(0, 99))
+                        val global = ((index * 100) + filePct) / totalFiles
+                        onProgress(global.coerceIn(0, 99))
+
+                        val bucket = filePct / 10
+                        if (bucket != lastBucket || filePct == 100) {
+                            lastBucket = bucket
                             onStatus("${spec.relativePath}: $filePct%")
                         }
                     }
@@ -96,7 +98,7 @@ class ModelDownloader(
         c.instanceFollowRedirects = true
         c.connectTimeout = 30_000
         c.readTimeout = 60_000
-        c.setRequestProperty("User-Agent", "ORBI-OmniVoice-EdgeLab/0.1")
+        c.setRequestProperty("User-Agent", "ORBI-OmniVoice-EdgeLab/0.3")
         if (offset > 0) c.setRequestProperty("Range", "bytes=$offset-")
         c.connect()
         return c
