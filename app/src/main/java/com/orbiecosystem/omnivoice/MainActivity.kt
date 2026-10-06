@@ -27,11 +27,13 @@ class MainActivity : Activity() {
     private var downloader: ModelDownloader? = null
     private var player: MediaPlayer? = null
     private var isRecording = false
+    private var asrController: ReferenceAsrController? = null
 
     private lateinit var status: TextView
     private lateinit var deviceText: TextView
     private lateinit var progress: ProgressBar
     private lateinit var refText: EditText
+    private lateinit var asrStatus: TextView
     private lateinit var targetText: EditText
     private lateinit var backend: Spinner
     private lateinit var steps: Spinner
@@ -58,6 +60,20 @@ class MainActivity : Activity() {
         setContentView(buildUi())
         showDevice()
         refreshModelState()
+        asrController = ReferenceAsrController(
+            context = this,
+            onStatus = { message -> runOnUiThread { updateAsrStatus(message) } },
+            onTranscript = { text, finalResult ->
+                runOnUiThread {
+                    if (!finalResult && refText.hasFocus()) return@runOnUiThread
+                    refText.setText(text)
+                    refText.setSelection(refText.text.length)
+                    if (finalResult) {
+                        updateAsrStatus("Transcripción automática lista · revisa y corrige solo si hace falta")
+                    }
+                }
+            }
+        )
     }
 
     private fun versionName(): String = try {
@@ -76,7 +92,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(text("ORBI OmniVoice Edge Lab", 26f, true))
-        root.addView(text("Android ${versionName()} · AUTO duration + speed + WAV cleanup", 14f, false))
+        root.addView(text("Android ${versionName()} · Español (es) + transcripción automática editable", 14f, false))
         root.addView(space(10))
 
         root.addView(section("1 · Device Readiness"))
@@ -127,36 +143,39 @@ class MainActivity : Activity() {
         recordRow.addView(pick, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(recordRow)
 
-        val diagnosticRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         playReference = Button(this).apply {
             text = "▶ Escuchar referencia"
             isEnabled = false
             setOnClickListener { referenceFile?.let { playFile(it, "referencia") } }
         }
+        root.addView(playReference)
+
+        refText = edit("Transcripción de referencia · automática y editable", 3)
+        root.addView(refText)
+        asrStatus = text("ASR: al grabar intentará transcribir automáticamente en Español Latino.", 12f, false)
+        root.addView(asrStatus)
+        root.addView(text("Recomendado: 5–8 s, voz limpia, sin música. Revisa el texto y corrige solo si una palabra quedó mal.", 12f, false))
+
+        val diagnosticRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         roundTrip = Button(this).apply {
-            text = "TEST CODEC"
+            text = "Diagnóstico · TEST CODEC"
             isEnabled = false
             setOnClickListener { runRoundTrip() }
         }
-        diagnosticRow.addView(playReference, LinearLayout.LayoutParams(0, -2, 1f))
-        diagnosticRow.addView(roundTrip, LinearLayout.LayoutParams(0, -2, 1f))
-        root.addView(diagnosticRow)
-
         playRoundTrip = Button(this).apply {
-            text = "▶ Escuchar reconstrucción del codec"
+            text = "▶ Codec reconstruido"
             isEnabled = false
             setOnClickListener { roundTripFile?.let { playFile(it, "round-trip") } }
         }
-        root.addView(playRoundTrip)
-
-        refText = edit("Transcripción EXACTA del audio de referencia", 3)
-        root.addView(refText)
-        root.addView(text("Recomendado: 5–8 s, voz limpia, sin música.", 12f, false))
+        diagnosticRow.addView(roundTrip, LinearLayout.LayoutParams(0, -2, 1f))
+        diagnosticRow.addView(playRoundTrip, LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(diagnosticRow)
         root.addView(space(12))
 
         root.addView(section("4 · Synthesis"))
+        root.addView(text("Idioma OmniVoice: Español · es", 13f, true))
         targetText = edit("Texto a sintetizar", 4).apply {
-            setText("Hola, esta es una prueba.")
+            setText("Hola, soy Víctor. Esta es una prueba de clonación de voz realizada directamente desde mi teléfono.")
         }
         root.addView(targetText)
 
@@ -171,13 +190,8 @@ class MainActivity : Activity() {
 
         speed = spinner(listOf("0.75", "0.90", "1.00", "1.10", "1.25")).apply { setSelection(2) }
         root.addView(labelled("Velocidad (1.00 = normal; <1 lento; >1 rápido)", speed))
-        root.addView(text("En modo manual la duración fija reemplaza el control de velocidad, igual que OmniVoice upstream.", 12f, false))
 
         root.addView(space(8))
-        root.addView(text(
-            "Prueba A: TTS sin referencia. AUTO estima la cantidad de frames desde el texto.",
-            12f, false
-        ))
         generateAuto = Button(this).apply {
             text = "GENERAR TTS SIN REFERENCIA"
             setOnClickListener { generateAutoVoice() }
@@ -191,10 +205,6 @@ class MainActivity : Activity() {
         root.addView(playAuto)
 
         root.addView(space(8))
-        root.addView(text(
-            "Prueba B: clonación. AUTO usa tu transcripción + duración real de la referencia para estimar tu ritmo.",
-            12f, false
-        ))
         consent = CheckBox(this).apply {
             text = "Confirmo que tengo autorización para clonar esta voz y que este build es solo I+D no comercial."
         }
@@ -226,8 +236,9 @@ class MainActivity : Activity() {
 
         root.addView(space(14))
         root.addView(text(
-            "v0.6: duración AUTO inspirada en RuleDurationEstimator upstream, control speed y postproceso conservador. " +
-                "Las salidas finales se publican como WAV en Descargas/ORBI OmniVoice.\n\n" +
+            "Flujo normal: grabar → transcripción automática editable → AUTO → clonar. " +
+                "TEST CODEC queda solo como diagnóstico. Las salidas WAV se publican en Descargas/ORBI OmniVoice.\n\n" +
+                "ASR: usa reconocimiento on-device cuando Android lo ofrece; si no, usa el reconocedor del sistema con preferencia offline. " +
                 "Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
             12f, false
         ))
@@ -254,6 +265,11 @@ class MainActivity : Activity() {
     private fun setInferenceButtons(enabled: Boolean) {
         generate.isEnabled = enabled
         generateAuto.isEnabled = enabled
+    }
+
+    private fun updateAsrStatus(message: String) {
+        asrStatus.text = message
+        appendStatus(message)
     }
 
     private fun startDownload() {
@@ -295,6 +311,7 @@ class MainActivity : Activity() {
             return
         }
         try {
+            refText.setText("")
             recorder.start()
             isRecording = true
             recButton.isEnabled = false
@@ -303,10 +320,13 @@ class MainActivity : Activity() {
             roundTrip.isEnabled = false
             appendStatus("Grabando referencia… habla 5–8 segundos.")
             refLabel.text = "Referencia: GRABANDO…"
+            updateAsrStatus("ASR: iniciando transcripción automática…")
+            asrController?.start()
         } catch (t: Throwable) {
             isRecording = false
             recButton.isEnabled = true
             stopButton.isEnabled = false
+            asrController?.cancel()
             appendStatus("REC ERROR: ${t.message}")
         }
     }
@@ -322,7 +342,12 @@ class MainActivity : Activity() {
             val saved = recorder.stopToWav(f)
             require(saved.isFile && saved.length() > 44) { "La grabación WAV no se creó correctamente" }
             setReference(saved, "Referencia guardada")
+            asrController?.stop()
+            if (refText.text.toString().isBlank()) {
+                updateAsrStatus("ASR: esperando resultado… si no aparece texto, escríbelo manualmente")
+            }
         } catch (t: Throwable) {
+            asrController?.cancel()
             appendStatus("STOP REC ERROR: ${t.message}")
         } finally {
             isRecording = false
@@ -383,6 +408,7 @@ class MainActivity : Activity() {
                 refLabel.text = "Referencia: ${f.name} · %.1f s".format(sec)
                 playReference.isEnabled = true
                 roundTrip.isEnabled = ModelCatalog.isComplete(filesDir)
+                updateAsrStatus("ASR automático en esta build se ejecuta durante una grabación nueva; para WAV importado revisa/escribe la transcripción manualmente")
                 appendStatus("WAV importado · %.1f s · ${w.sampleRate} Hz".format(sec))
             }
         } catch (t: Throwable) {
@@ -498,7 +524,7 @@ class MainActivity : Activity() {
 
         setInferenceButtons(false)
         playAuto.isEnabled = false
-        appendStatus("AUTO START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        appendStatus("AUTO START · Español(es) · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         work.execute {
             try {
@@ -549,7 +575,7 @@ class MainActivity : Activity() {
         val refTx = refText.text.toString().trim()
         val target = targetText.text.toString().trim()
         if (refTx.isBlank()) {
-            toast("Escribe la transcripción exacta de la referencia.")
+            toast("La transcripción de referencia está vacía. Espera al ASR o escríbela/corrígela manualmente.")
             return
         }
         if (target.isBlank()) {
@@ -568,7 +594,7 @@ class MainActivity : Activity() {
 
         setInferenceButtons(false)
         play.isEnabled = false
-        appendStatus("CLONE START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        appendStatus("CLONE START · Español(es) · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         work.execute {
             try {
@@ -668,6 +694,7 @@ class MainActivity : Activity() {
     private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        asrController?.cancel()
         downloader?.cancel()
         recorder.cancel()
         engine?.close()
