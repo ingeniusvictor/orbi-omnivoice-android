@@ -44,8 +44,8 @@ class OmniVoiceEngine(
         private const val HIDDEN = 1024
         private const val SR24 = 24_000
         private const val SR16 = 16_000
+        private const val LANGUAGE_ID = "es"
 
-        // Upstream OmniVoice generation defaults.
         private const val GUIDANCE_SCALE = 2.0f
         private const val T_SHIFT = 0.1f
         private const val LAYER_PENALTY = 5.0f
@@ -53,9 +53,6 @@ class OmniVoiceEngine(
     }
 
     private val env = OrtEnvironment.getEnvironment()
-
-    // Selected EP is useful for embeddings/heads/Higgs. The corrected diffusion LLM is kept on
-    // the CPU EP deliberately: correctness first, and its bidirectional 4-D mask is the critical path.
     private val options = OrtSession.SessionOptions()
     private val llmOptions = OrtSession.SessionOptions()
 
@@ -95,6 +92,7 @@ class OmniVoiceEngine(
             }
         }
         log("Backbone bidireccional: CPUExecutionProvider (correctness path)")
+        log("Idioma OmniVoice: Español ($LANGUAGE_ID)")
     }
 
     private fun load() {
@@ -106,7 +104,7 @@ class OmniVoiceEngine(
         val bidir = ModelCatalog.bidirBackboneDir(filesDir)
         val h = ModelCatalog.higgsDir(filesDir)
 
-        log("Cargando sesiones ONNX v0.5.1…")
+        log("Cargando sesiones ONNX…")
         embeddings = env.createSession(File(b, "audio_embeddings_encoder.onnx").absolutePath, options)
         llm = env.createSession(File(bidir, "llm_decoder.onnx").absolutePath, llmOptions)
         heads = env.createSession(File(b, "audio_heads_decoder.onnx").absolutePath, options)
@@ -226,15 +224,6 @@ class OmniVoiceEngine(
     private fun encodeText(text: String): LongArray =
         tokenizer!!.encode(text, false).ids.map { it.toLong() }.toLongArray()
 
-    /**
-     * Faithful Android port of OmniVoice's masked-diffusion decoding contract:
-     * - prompt framing with language/instruction/text markers;
-     * - reference text is concatenated before target text for cloning;
-     * - reference audio codes are marked as audio embeddings;
-     * - classifier-free guidance against an unconditional audio-grid branch;
-     * - per-(codebook,frame) top-k reveal schedule using t_shift=0.1;
-     * - layer penalty and Gumbel position sampling.
-     */
     private fun diffusionGenerate(
         targetText: String,
         referenceText: String?,
@@ -250,7 +239,7 @@ class OmniVoiceEngine(
 
         var styleText = ""
         if (cloning) styleText += "<|denoise|>"
-        styleText += "<|lang_start|>None<|lang_end|>"
+        styleText += "<|lang_start|>$LANGUAGE_ID<|lang_end|>"
         styleText += "<|instruct_start|>None<|instruct_end|>"
 
         val fullText = if (cloning && !referenceText.isNullOrBlank()) {
@@ -271,16 +260,14 @@ class OmniVoiceEngine(
         val condSeq = promptN + refFrames + genFrames
         val condGenStart = promptN + refFrames
         val condAudioStart = if (cloning) promptN else condGenStart
-        val batch = 2 // conditional + unconditional CFG branch
+        val batch = 2
 
         log(
-            "DIFFUSION · mode=${if (cloning) "clone" else "auto"} · prompt=$promptN tokens · " +
+            "DIFFUSION · mode=${if (cloning) "clone" else "auto"} · lang=$LANGUAGE_ID · prompt=$promptN tokens · " +
                 "ref=$refFrames · target=$genFrames · steps=$steps"
         )
         log("CFG=$GUIDANCE_SCALE · tShift=$T_SHIFT · layerPenalty=$LAYER_PENALTY · posTemp=$POSITION_TEMPERATURE")
 
-        // Static attention masks. Conditional sees the complete sequence bidirectionally.
-        // Unconditional sees only the target grid; padding positions self-attend only.
         val attention = BooleanArray(batch * condSeq * condSeq)
         fun attIndex(b: Int, q: Int, k: Int): Int = (b * condSeq + q) * condSeq + k
         for (q in 0 until condSeq) {
@@ -463,12 +450,6 @@ class OmniVoiceEngine(
         }
     }
 
-    /**
-     * The corrected bidirectional INT4 export currently exposes a fixed batch dimension of 1.
-     * CFG needs two logical branches (conditional + unconditional), so execute them sequentially
-     * and concatenate the logits back into the same logical [2,8,S,1025] layout expected by the
-     * diffusion loop. This keeps the model contract valid without disabling classifier-free guidance.
-     */
     private fun runBackboneBatch(
         ids: LongArray,
         audioMask: BooleanArray,
