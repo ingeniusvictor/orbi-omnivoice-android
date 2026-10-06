@@ -138,8 +138,8 @@ class OmniVoiceEngine(
         }
         log("Referencia: $refFrames frames (≈ %.2f s), ${refMs} ms".format(refFrames / 25f))
 
-        val textIds = tokenizer!!.encode(targetText, true).ids.map { it.toLong() }.toLongArray()
-        log("Texto: ${textIds.size} tokens")
+        val textIds = tokenize(targetText)
+        log("Texto: ${textIds.size} tokens · ids=${textIds.take(12).joinToString(",")}")
 
         val genFrames = max(20, (outputSeconds * 25f).toInt())
         var codes = LongArray(0)
@@ -160,6 +160,50 @@ class OmniVoiceEngine(
             total, outSec, outputFile
         )
     }
+
+    /**
+     * Diagnostic path that intentionally omits the reference prefix.
+     * If this path is intelligible while voice cloning is not, the failure is in
+     * reference-prefix conditioning. If this path is also unintelligible, the
+     * problem is upstream of the codec: tokenization/backbone/unmasking.
+     */
+    fun generateAutoVoice(
+        targetText: String,
+        steps: Int,
+        outputSeconds: Float,
+        outputFile: File
+    ): GenerationStats {
+        require(targetText.isNotBlank()) { "Escribe el texto a sintetizar" }
+        require(steps in setOf(4, 8, 16, 32)) { "steps debe ser 4/8/16/32" }
+        require(outputSeconds in 0.8f..8f) { "Duración fuera de rango" }
+
+        val totalStart = System.currentTimeMillis()
+        load()
+        val textIds = tokenize(targetText)
+        log("AUTO-VOICE · ${textIds.size} tokens · ids=${textIds.take(12).joinToString(",")}")
+
+        val genFrames = max(20, (outputSeconds * 25f).toInt())
+        var codes = LongArray(0)
+        val genMs = measureTimeMillis {
+            codes = iterativeUnmask(textIds, LongArray(0), 0, genFrames, steps)
+        }
+
+        var waveform = FloatArray(0)
+        val decodeMs = measureTimeMillis {
+            waveform = higgsDecode(codes, genFrames)
+        }
+        WavIO.writePcm16(outputFile, waveform, SR24)
+        val total = System.currentTimeMillis() - totalStart
+        val outSec = waveform.size.toFloat() / SR24
+
+        return GenerationStats(
+            backend, steps, genFrames, 0, 0, genMs, decodeMs,
+            total, outSec, outputFile
+        )
+    }
+
+    private fun tokenize(text: String): LongArray =
+        tokenizer!!.encode(text, true).ids.map { it.toLong() }.toLongArray()
 
     private fun higgsEncode(wav24: FloatArray, wav16: FloatArray): Pair<LongArray, Int> {
         val acousticOut = runFloat(
