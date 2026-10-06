@@ -20,6 +20,7 @@ class MainActivity : Activity() {
     private val recorder = ReferenceRecorder()
     private var referenceFile: File? = null
     private var outputFile: File? = null
+    private var autoVoiceFile: File? = null
     private var roundTripFile: File? = null
     private var engine: OmniVoiceEngine? = null
     private var roundTripEngine: HiggsRoundTrip? = null
@@ -39,6 +40,8 @@ class MainActivity : Activity() {
     private lateinit var refLabel: TextView
     private lateinit var generate: Button
     private lateinit var play: Button
+    private lateinit var generateAuto: Button
+    private lateinit var playAuto: Button
     private lateinit var recButton: Button
     private lateinit var stopButton: Button
     private lateinit var playReference: Button
@@ -66,7 +69,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(text("ORBI OmniVoice Edge Lab", 26f, true))
-        root.addView(text("Voice cloning local · Android diagnostic v0.3 · POCO X7 Pro", 14f, false))
+        root.addView(text("Android diagnostic v0.4 · POCO X7 Pro · backbone isolation", 14f, false))
         root.addView(space(10))
 
         root.addView(section("1 · Device Readiness"))
@@ -144,7 +147,7 @@ class MainActivity : Activity() {
         root.addView(text("Recomendado: 5–8 s, voz limpia, sin música.", 12f, false))
         root.addView(space(12))
 
-        root.addView(section("4 · Synthesis"))
+        root.addView(section("4 · Synthesis / Backbone Diagnostic"))
         targetText = edit("Texto a sintetizar", 4).apply {
             setText("Hola, esta es una prueba.")
         }
@@ -157,21 +160,42 @@ class MainActivity : Activity() {
         duration = spinner(listOf("1.0", "1.5", "2.0", "3.0", "5.0")).apply { setSelection(2) }
         root.addView(labelled("Duración objetivo (s)", duration))
 
+        root.addView(text(
+            "Prueba A: TTS sin referencia. Aísla tokenizer + embeddings + LLM + audio heads + iterative unmasking + decoder.",
+            12f, false
+        ))
+        generateAuto = Button(this).apply {
+            text = "GENERAR TTS SIN REFERENCIA"
+            setOnClickListener { generateAutoVoice() }
+        }
+        root.addView(generateAuto)
+        playAuto = Button(this).apply {
+            text = "▶ Reproducir TTS sin referencia"
+            isEnabled = false
+            setOnClickListener { autoVoiceFile?.let { playFile(it, "auto-voice") } }
+        }
+        root.addView(playAuto)
+
+        root.addView(space(8))
+        root.addView(text(
+            "Prueba B: clonación. Añade el prefijo de códigos de la voz de referencia al mismo backbone.",
+            12f, false
+        ))
         consent = CheckBox(this).apply {
             text = "Confirmo que tengo autorización para clonar esta voz y que este build es solo I+D no comercial."
         }
         root.addView(consent)
 
         generate = Button(this).apply {
-            text = "GENERAR VOZ LOCAL"
-            setOnClickListener { generate() }
+            text = "GENERAR VOZ CLONADA"
+            setOnClickListener { generateClone() }
         }
         root.addView(generate)
 
         play = Button(this).apply {
-            text = "▶ Reproducir resultado"
+            text = "▶ Reproducir resultado clonado"
             isEnabled = false
-            setOnClickListener { outputFile?.let { playFile(it, "resultado") } }
+            setOnClickListener { outputFile?.let { playFile(it, "resultado clonado") } }
         }
         root.addView(play)
 
@@ -188,8 +212,9 @@ class MainActivity : Activity() {
 
         root.addView(space(14))
         root.addView(text(
-            "Diagnóstico: primero compara la referencia original con la reconstrucción TEST CODEC. " +
-                "Si ambas se entienden igual, el codec Higgs está sano y el problema está en la generación OmniVoice.\n\n" +
+            "Interpretación v0.4:\n" +
+                "• TEST CODEC claro + TTS sin referencia claro → problema específico del prefijo de clonación.\n" +
+                "• TEST CODEC claro + TTS sin referencia ininteligible → problema en tokenizer/backbone/unmasking.\n\n" +
                 "Licencia: este laboratorio no redistribuye pesos. Los descarga desde Hugging Face. " +
                 "Trata los pesos derivados de OmniVoice como I+D/no comercial hasta aclarar por separado su licencia comercial.",
             12f, false
@@ -201,7 +226,7 @@ class MainActivity : Activity() {
     private fun showDevice() {
         val d = DeviceInfo.read(this)
         deviceText.text = d.pretty() +
-            "\nPerfil de prueba: POCO X7 Pro / Dimensity 8400-Ultra → XNNPACK; diagnóstico codec antes de seguir afinando steps."
+            "\nPerfil: POCO X7 Pro / Dimensity 8400-Ultra → XNNPACK. Codec ya validado; ahora aislamos el backbone."
     }
 
     private fun refreshModelState() {
@@ -214,13 +239,18 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun setInferenceButtons(enabled: Boolean) {
+        generate.isEnabled = enabled
+        generateAuto.isEnabled = enabled
+    }
+
     private fun startDownload() {
         if (ModelCatalog.isComplete(filesDir)) {
             progress.visibility = View.GONE
             appendStatus("MODEL PACK: READY · no es necesario descargar nuevamente")
             return
         }
-        generate.isEnabled = false
+        setInferenceButtons(false)
         progress.progress = 0
         progress.visibility = View.VISIBLE
         downloader = ModelDownloader(
@@ -232,13 +262,13 @@ class MainActivity : Activity() {
             try {
                 downloader!!.downloadAll()
                 runOnUiThread {
-                    generate.isEnabled = true
+                    setInferenceButtons(true)
                     progress.visibility = View.GONE
                     refreshModelState()
                 }
             } catch (t: Throwable) {
                 runOnUiThread {
-                    generate.isEnabled = true
+                    setInferenceButtons(true)
                     progress.visibility = View.GONE
                     appendStatus("DOWNLOAD ERROR: ${t.message}")
                 }
@@ -389,7 +419,58 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun generate() {
+    private fun generateAutoVoice() {
+        if (!ModelCatalog.isComplete(filesDir)) {
+            toast("Primero descarga el Model Pack.")
+            return
+        }
+        val target = targetText.text.toString().trim()
+        if (target.isBlank()) {
+            toast("Escribe el texto a sintetizar.")
+            return
+        }
+
+        val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
+        val nSteps = steps.selectedItem.toString().toInt()
+        val secs = duration.selectedItem.toString().toFloat()
+        val out = File(filesDir, "outputs/auto_voice_${System.currentTimeMillis()}.wav")
+        out.parentFile?.mkdirs()
+        autoVoiceFile = out
+
+        setInferenceButtons(false)
+        playAuto.isEnabled = false
+        appendStatus("AUTO START · $selectedBackend · $nSteps steps · ${secs}s · SIN referencia")
+
+        work.execute {
+            try {
+                engine?.close()
+                engine = OmniVoiceEngine(filesDir, selectedBackend) { s ->
+                    runOnUiThread { appendStatus(s) }
+                }
+                val stats = engine!!.generateAutoVoice(target, nSteps, secs, out)
+                runOnUiThread {
+                    setInferenceButtons(true)
+                    playAuto.isEnabled = true
+                    appendStatus(
+                        "AUTO SUCCESS\n" +
+                            "backend=${stats.backend}\nsteps=${stats.steps}\n" +
+                            "genFrames=${stats.frames}\n" +
+                            "generation=${stats.generationMs} ms\n" +
+                            "decode=${stats.decodeMs} ms\n" +
+                            "total=${stats.totalMs} ms\n" +
+                            "audio=%.2f s".format(stats.outputSeconds)
+                    )
+                }
+            } catch (t: Throwable) {
+                runOnUiThread {
+                    setInferenceButtons(true)
+                    appendStatus("AUTO INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
+        }
+    }
+
+    private fun generateClone() {
         if (!consent.isChecked) {
             toast("Debes confirmar consentimiento y uso I+D.")
             return
@@ -415,9 +496,9 @@ class MainActivity : Activity() {
         outputFile = File(filesDir, "outputs/orbi_omnivoice_${System.currentTimeMillis()}.wav")
         outputFile!!.parentFile?.mkdirs()
 
-        generate.isEnabled = false
+        setInferenceButtons(false)
         play.isEnabled = false
-        appendStatus("START · $selectedBackend · $nSteps steps · ${secs}s")
+        appendStatus("CLONE START · $selectedBackend · $nSteps steps · ${secs}s")
 
         work.execute {
             try {
@@ -427,10 +508,10 @@ class MainActivity : Activity() {
                 }
                 val stats = engine!!.generate(ref, refTx, target, nSteps, secs, outputFile!!)
                 runOnUiThread {
-                    generate.isEnabled = true
+                    setInferenceButtons(true)
                     play.isEnabled = true
                     appendStatus(
-                        "SUCCESS\n" +
+                        "CLONE SUCCESS\n" +
                             "backend=${stats.backend}\nsteps=${stats.steps}\n" +
                             "refFrames=${stats.referenceFrames}\ngenFrames=${stats.frames}\n" +
                             "refEncode=${stats.referenceEncodeMs} ms\n" +
@@ -442,8 +523,8 @@ class MainActivity : Activity() {
                 }
             } catch (t: Throwable) {
                 runOnUiThread {
-                    generate.isEnabled = true
-                    appendStatus("INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
+                    setInferenceButtons(true)
+                    appendStatus("CLONE INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
                 }
             }
         }
@@ -466,7 +547,7 @@ class MainActivity : Activity() {
 
     private fun appendStatus(s: String) {
         val lines = (status.text.toString() + "\n" + s).lines()
-        status.text = lines.takeLast(80).joinToString("\n")
+        status.text = lines.takeLast(90).joinToString("\n")
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
