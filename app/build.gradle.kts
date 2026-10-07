@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.9.7-asr-symbol-aligned-session"
+        versionCode = 20
+        versionName = "0.9.7-isolated-asr-session-results"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -77,8 +77,8 @@ android {
 }
 
 dependencies {
-    // OmniVoice uses ORT 1.30.0. CI rebuilds sherpa JNI against that exact runtime and gates
-    // the OrtGetApiBase symbol version before packaging.
+    // OmniVoice keeps ORT 1.30.0. CI stages the official Sherpa AAR with its own ORT renamed;
+    // Whisper runs in the dedicated :asr process so both native runtimes are isolated.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
