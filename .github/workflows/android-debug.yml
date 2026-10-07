@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar
-          key: sherpa-onnx-v1.13.8-ort1.30.0-arm64-shared-v1
+          key: sherpa-onnx-v1.13.8-ort1.30.0-arm64-shared-v2-symbol-gated
 
       - name: Build sherpa-onnx AAR against ONNX Runtime 1.30.0
         if: steps.sherpa-cache.outputs.cache-hit != 'true'
@@ -56,6 +56,17 @@ jobs:
           ./build-android-arm64-v8a.sh
           popd
 
+          SHERPA_LIB=/tmp/sherpa-onnx/build-android-arm64-v8a/install/lib/libsherpa-onnx-jni.so
+          ORT_LIB=/tmp/sherpa-onnx/build-android-arm64-v8a/install/lib/libonnxruntime.so
+          test -f "$SHERPA_LIB"
+          test -f "$ORT_LIB"
+          echo 'Sherpa required ORT symbol:'
+          readelf -Ws "$SHERPA_LIB" | grep 'OrtGetApiBase'
+          readelf -Ws "$SHERPA_LIB" | grep -q 'OrtGetApiBase@VERS_1.30.0'
+          echo 'Bundled ORT exported symbol:'
+          readelf -Ws "$ORT_LIB" | grep 'OrtGetApiBase'
+          readelf -Ws "$ORT_LIB" | grep -q 'OrtGetApiBase@@VERS_1.30.0'
+
           mkdir -p /tmp/sherpa-aar app/libs ci-cache
           curl -fL --retry 3 \
             -o /tmp/sherpa-official.aar \
@@ -67,14 +78,13 @@ jobs:
           rm -rf jni
           mkdir -p jni/arm64-v8a
 
-          # Use the Java/Kotlin API from the official AAR but native binaries freshly built
-          # against the same ORT 1.30.0 used by OmniVoice.
+          # Java/Kotlin API from the official AAR, native JNI freshly built against ORT 1.30.0.
           find /tmp/sherpa-onnx/build-android-arm64-v8a/install/lib -maxdepth 1 -type f -name '*.so' \
             ! -name 'libonnxruntime.so' -exec cp -v {} jni/arm64-v8a/ \;
 
           jar tf classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
           test -f jni/arm64-v8a/libsherpa-onnx-jni.so
-          readelf -d jni/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'libonnxruntime.so'
+          readelf -Ws jni/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
 
           zip -qr /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar .
           cp /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar \
@@ -89,7 +99,9 @@ jobs:
           unzip -p app/libs/sherpa-onnx-1.13.8.aar classes.jar > /tmp/sherpa-classes.jar
           jar tf /tmp/sherpa-classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
           unzip -p app/libs/sherpa-onnx-1.13.8.aar jni/arm64-v8a/libsherpa-onnx-jni.so > /tmp/libsherpa-onnx-jni.so
-          readelf -d /tmp/libsherpa-onnx-jni.so | grep -q 'libonnxruntime.so'
+          echo 'Staged sherpa ORT symbol requirement:'
+          readelf -Ws /tmp/libsherpa-onnx-jni.so | grep 'OrtGetApiBase'
+          readelf -Ws /tmp/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -112,11 +124,13 @@ jobs:
             -d /tmp/orbi-apk-check
 
           echo 'libonnxruntime.so:'
-          strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep -m1 -E '^1\.30\.'
-          echo 'libonnxruntime4j_jni.so:'
-          strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime4j_jni.so | grep -m1 -E '^1\.30\.'
-          echo 'sherpa JNI dependency:'
-          readelf -d /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep 'libonnxruntime.so'
+          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep 'OrtGetApiBase'
+          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep -q 'OrtGetApiBase@@VERS_1.30.0'
+          echo 'libonnxruntime4j_jni.so dependency:'
+          readelf -d /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime4j_jni.so | grep 'libonnxruntime.so'
+          echo 'sherpa JNI required ORT symbol:'
+          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep 'OrtGetApiBase'
+          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
 
           found=0
           while IFS= read -r dex; do
