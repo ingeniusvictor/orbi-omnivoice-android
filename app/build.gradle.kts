@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.9.3-screen-off-guard"
+        versionCode = 16
+        versionName = "0.9.4-rotation-safe-inference"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
