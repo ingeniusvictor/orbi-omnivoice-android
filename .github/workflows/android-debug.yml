@@ -24,6 +24,16 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Fetch sherpa-onnx Android AAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl -fL --retry 3 \
+            -o app/libs/sherpa-onnx-1.13.8.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
+          echo "633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96  app/libs/sherpa-onnx-1.13.8.aar" | sha256sum -c -
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
