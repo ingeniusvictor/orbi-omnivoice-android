@@ -1,10 +1,8 @@
 package com.orbiecosystem.omnivoice
 
 import android.content.Context
-import com.k2fsa.sherpa.onnx.OfflineModelConfig
-import com.k2fsa.sherpa.onnx.OfflineRecognizer
-import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
-import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
+import android.os.SystemClock
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -44,47 +42,41 @@ class ReferenceAsrController(
                     "El pack Whisper local no quedó completo"
                 }
 
-                onStatus("ASR local: Whisper Tiny INT8 · Español · transcribiendo WAV…")
-                val dir = ModelCatalog.asrDir(context.filesDir)
-                val wav = WavIO.readPcm16(wavFile)
+                onStatus("ASR local: Whisper Tiny INT8 · Español · proceso aislado…")
+                val resultFile = WhisperAsrService.resultFile(context.filesDir)
+                resultFile.delete()
+                WhisperAsrService.start(context.applicationContext, wavFile, ticket)
 
-                val modelConfig = OfflineModelConfig(
-                    whisper = OfflineWhisperModelConfig(
-                        encoder = File(dir, "tiny-encoder.int8.onnx").absolutePath,
-                        decoder = File(dir, "tiny-decoder.int8.onnx").absolutePath,
-                        language = "es",
-                        task = "transcribe",
-                        tailPaddings = 250
-                    ),
-                    tokens = File(dir, "tiny-tokens.txt").absolutePath,
-                    numThreads = 4,
-                    debug = false,
-                    provider = "cpu",
-                    modelType = "whisper"
-                )
-                val config = OfflineRecognizerConfig(
-                    modelConfig = modelConfig,
-                    decodingMethod = "greedy_search"
-                )
-
-                var recognizer: OfflineRecognizer? = null
-                var stream: com.k2fsa.sherpa.onnx.OfflineStream? = null
-                try {
-                    recognizer = OfflineRecognizer(config = config)
-                    stream = recognizer.createStream()
-                    stream.acceptWaveform(wav.samples, wav.sampleRate)
-                    recognizer.decode(stream)
-                    val text = recognizer.getResult(stream).text.trim()
-                    if (generation.get() != ticket) return@execute
-                    if (text.isNotBlank()) {
-                        onTranscript(text, true)
-                        onStatus("ASR local: transcripción lista · revisa y corrige solo si hace falta")
-                    } else {
-                        onStatus("ASR local: Whisper no devolvió texto · puedes escribirlo manualmente")
+                val deadline = SystemClock.elapsedRealtime() + ASR_TIMEOUT_MS
+                while (generation.get() == ticket && SystemClock.elapsedRealtime() < deadline) {
+                    if (resultFile.isFile) {
+                        val payload = try {
+                            JSONObject(resultFile.readText(Charsets.UTF_8))
+                        } catch (_: Throwable) {
+                            null
+                        }
+                        if (payload != null && payload.optLong("ticket", -1L) == ticket) {
+                            resultFile.delete()
+                            if (payload.optBoolean("ok", false)) {
+                                val text = payload.optString("text", "").trim()
+                                if (text.isNotBlank()) {
+                                    onTranscript(text, true)
+                                    onStatus("ASR local: transcripción lista · revisa y corrige solo si hace falta")
+                                } else {
+                                    onStatus("ASR local: Whisper no devolvió texto · puedes escribirlo manualmente")
+                                }
+                            } else {
+                                val error = payload.optString("error", "Error ASR desconocido")
+                                onStatus("ASR local ERROR aislado: $error")
+                            }
+                            return@execute
+                        }
                     }
-                } finally {
-                    try { stream?.release() } catch (_: Throwable) {}
-                    try { recognizer?.release() } catch (_: Throwable) {}
+                    Thread.sleep(POLL_MS)
+                }
+
+                if (generation.get() == ticket) {
+                    onStatus("ASR local ERROR: timeout esperando al proceso Whisper")
                 }
             } catch (t: Throwable) {
                 if (generation.get() == ticket) {
@@ -101,5 +93,10 @@ class ReferenceAsrController(
     fun close() {
         generation.incrementAndGet()
         work.shutdownNow()
+    }
+
+    companion object {
+        private const val ASR_TIMEOUT_MS = 90_000L
+        private const val POLL_MS = 100L
     }
 }
