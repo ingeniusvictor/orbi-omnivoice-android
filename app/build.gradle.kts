@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.9.1-ort-native-aligned"
+        versionCode = 14
+        versionName = "0.9.2-single-ort-runtime"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -63,9 +63,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
-            // sherpa-onnx 1.13.8 is built against ONNX Runtime 1.28.2.
-            // Keep a single native runtime and align ORT Java/JNI to that exact ABI.
-            pickFirsts += setOf("**/libonnxruntime.so")
         }
         resources {
             excludes += setOf(
@@ -80,7 +77,9 @@ android {
 }
 
 dependencies {
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.28.2")
+    // Single authoritative ORT Java/JNI/native stack for OmniVoice and sherpa JNI.
+    // CI strips sherpa's bundled older libonnxruntime.so from the AAR before packaging.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
 }
