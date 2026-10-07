@@ -31,6 +31,12 @@
                 android:value="local on-device neural speech inference initiated by the user" />
         </service>
 
+        <service
+            android:name=".WhisperAsrService"
+            android:exported="false"
+            android:process=":asr"
+            android:stopWithTask="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
