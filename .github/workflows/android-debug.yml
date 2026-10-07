@@ -16,49 +16,80 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK 36
+      - name: Install Android SDK 36 and NDK
         shell: bash
         run: |
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018"
 
-      - name: Fetch sherpa-onnx Android AAR
+      - name: Cache ORT-aligned sherpa AAR
+        id: sherpa-cache
+        uses: actions/cache@v4
+        with:
+          path: ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar
+          key: sherpa-onnx-v1.13.8-ort1.30.0-arm64-shared-v1
+
+      - name: Build sherpa-onnx AAR against ONNX Runtime 1.30.0
+        if: steps.sherpa-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/sherpa-onnx /tmp/sherpa-aar
+          git clone --depth 1 --branch v1.13.8 --recursive --shallow-submodules \
+            https://github.com/k2-fsa/sherpa-onnx.git /tmp/sherpa-onnx
+
+          export ANDROID_NDK="${ANDROID_HOME}/ndk/27.2.12479018"
+          export BUILD_SHARED_LIBS=ON
+          export SHERPA_ONNX_ONNXRUNTIME_VERSION=1.30.0
+          export SHERPA_ONNX_ENABLE_TTS=OFF
+          export SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=OFF
+          export SHERPA_ONNX_ENABLE_BINARY=OFF
+          export SHERPA_ONNX_ENABLE_C_API=OFF
+
+          pushd /tmp/sherpa-onnx
+          ./build-android-arm64-v8a.sh
+          popd
+
+          mkdir -p /tmp/sherpa-aar app/libs ci-cache
+          curl -fL --retry 3 \
+            -o /tmp/sherpa-official.aar \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
+          echo "633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96  /tmp/sherpa-official.aar" | sha256sum -c -
+
+          cd /tmp/sherpa-aar
+          unzip -q /tmp/sherpa-official.aar
+          rm -rf jni
+          mkdir -p jni/arm64-v8a
+
+          # Use the Java/Kotlin API from the official AAR but native binaries freshly built
+          # against the same ORT 1.30.0 used by OmniVoice.
+          find /tmp/sherpa-onnx/build-android-arm64-v8a/install/lib -maxdepth 1 -type f -name '*.so' \
+            ! -name 'libonnxruntime.so' -exec cp -v {} jni/arm64-v8a/ \;
+
+          jar tf classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
+          test -f jni/arm64-v8a/libsherpa-onnx-jni.so
+          readelf -d jni/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'libonnxruntime.so'
+
+          zip -qr /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar .
+          cp /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar \
+            "${GITHUB_WORKSPACE}/ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar"
+
+      - name: Stage ORT-aligned sherpa AAR
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p app/libs
-          curl -fL --retry 3 \
-            -o app/libs/sherpa-onnx-1.13.8.aar \
-            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
-          echo "633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96  app/libs/sherpa-onnx-1.13.8.aar" | sha256sum -c -
-
-      - name: Strip sherpa bundled ONNX Runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from zipfile import ZipFile, ZIP_DEFLATED
-          from pathlib import Path
-
-          src = Path('app/libs/sherpa-onnx-1.13.8.aar')
-          tmp = src.with_suffix('.aar.tmp')
-          removed = []
-          with ZipFile(src, 'r') as zin, ZipFile(tmp, 'w', compression=ZIP_DEFLATED) as zout:
-              for item in zin.infolist():
-                  name = item.filename
-                  if name.endswith('/libonnxruntime.so') or name == 'libonnxruntime.so':
-                      removed.append(name)
-                      continue
-                  zout.writestr(item, zin.read(item.filename))
-          if not removed:
-              raise SystemExit('Expected sherpa AAR to contain libonnxruntime.so, but none was found')
-          tmp.replace(src)
-          print('Removed from sherpa AAR:')
-          for name in removed:
-              print(' -', name)
-          PY
+          cp ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar app/libs/sherpa-onnx-1.13.8.aar
+          unzip -p app/libs/sherpa-onnx-1.13.8.aar classes.jar > /tmp/sherpa-classes.jar
+          jar tf /tmp/sherpa-classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
+          unzip -p app/libs/sherpa-onnx-1.13.8.aar jni/arm64-v8a/libsherpa-onnx-jni.so > /tmp/libsherpa-onnx-jni.so
+          readelf -d /tmp/libsherpa-onnx-jni.so | grep -q 'libonnxruntime.so'
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -67,18 +98,34 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify ONNX Runtime native versions
+      - name: Verify ASR classes and ONNX Runtime alignment
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           rm -rf /tmp/orbi-apk-check
           mkdir -p /tmp/orbi-apk-check
-          unzip -q "$APK" 'lib/arm64-v8a/libonnxruntime.so' 'lib/arm64-v8a/libonnxruntime4j_jni.so' -d /tmp/orbi-apk-check
+          unzip -q "$APK" \
+            'lib/arm64-v8a/libonnxruntime.so' \
+            'lib/arm64-v8a/libonnxruntime4j_jni.so' \
+            'lib/arm64-v8a/libsherpa-onnx-jni.so' \
+            -d /tmp/orbi-apk-check
+
           echo 'libonnxruntime.so:'
           strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep -m1 -E '^1\.30\.'
           echo 'libonnxruntime4j_jni.so:'
           strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime4j_jni.so | grep -m1 -E '^1\.30\.'
+          echo 'sherpa JNI dependency:'
+          readelf -d /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep 'libonnxruntime.so'
+
+          found=0
+          while IFS= read -r dex; do
+            if unzip -p "$APK" "$dex" | strings | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer'; then
+              found=1
+              break
+            fi
+          done < <(unzip -Z1 "$APK" | grep -E '^classes[0-9]*\.dex$')
+          test "$found" -eq 1
 
       - uses: actions/upload-artifact@v4
         with:
