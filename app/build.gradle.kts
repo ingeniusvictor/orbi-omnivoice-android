@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.9.4-rotation-safe-inference"
+        versionCode = 17
+        versionName = "0.9.5-asr-runtime-aligned"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -77,8 +77,8 @@ android {
 }
 
 dependencies {
-    // Single authoritative ORT Java/JNI/native stack for OmniVoice and sherpa JNI.
-    // CI strips sherpa's bundled older libonnxruntime.so from the AAR before packaging.
+    // OmniVoice uses ORT 1.30.0. CI rebuilds sherpa JNI against that exact runtime and stages
+    // the API-compatible AAR at app/libs/sherpa-onnx-1.13.8.aar before Gradle runs.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
