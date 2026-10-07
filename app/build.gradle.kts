@@ -16,14 +16,14 @@ if (stableDebugKeystoreB64.isFile) {
 
 android {
     namespace = "com.orbiecosystem.omnivoice"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.0-es-auto-asr"
+        versionCode = 11
+        versionName = "0.8.0-background-asr-persist"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
