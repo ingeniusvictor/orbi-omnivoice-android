@@ -11,6 +11,15 @@ class OrbiApp : Application() {
         super.onCreate()
         appContext = applicationContext
 
+        // Generated outputs are session state only. Keep the reference/transcript and user settings,
+        // but never resurrect an old clone/TTS/codec result after a cold app start or APK update.
+        getSharedPreferences("orbi_omnivoice_session", MODE_PRIVATE)
+            .edit()
+            .remove("clone_output")
+            .remove("auto_output")
+            .remove("codec_output")
+            .apply()
+
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
                 InferenceKeepAliveService.start(this@OrbiApp)
