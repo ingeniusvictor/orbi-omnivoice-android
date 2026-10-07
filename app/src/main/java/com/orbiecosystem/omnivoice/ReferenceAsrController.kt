@@ -17,36 +17,36 @@ class ReferenceAsrController(
     private val work = Executors.newSingleThreadExecutor()
     private val generation = AtomicLong(0)
 
-    /**
-     * Deterministic local ASR path for v0.9.
-     *
-     * v0.7 tried to run Android SpeechRecognizer while ReferenceRecorder owned the microphone.
-     * v0.8 fed the saved WAV through EXTRA_AUDIO_SOURCE, but that path is OEM/recognizer-service
-     * dependent and did not return text reliably on the POCO X7 Pro. This version bypasses the
-     * Android recognition service completely and decodes the saved WAV with sherpa-onnx +
-     * multilingual Whisper tiny INT8, language pinned to Spanish.
-     */
     fun transcribeFile(wavFile: File) {
         val ticket = generation.incrementAndGet()
         if (!wavFile.isFile) {
             onStatus("ASR local: referencia WAV no encontrada")
             return
         }
-        if (!ModelCatalog.isAsrComplete(context.filesDir)) {
-            val missing = ModelCatalog.describeMissingAsr(context.filesDir)
-            onStatus(
-                "ASR local: faltan ${missing.size} archivos (~99 MB). " +
-                    "Pulsa Descargar / reanudar modelos y vuelve a grabar."
-            )
-            return
-        }
 
-        onStatus("ASR local: Whisper Tiny INT8 · Español · transcribiendo WAV…")
         work.execute {
             try {
+                if (!ModelCatalog.isAsrComplete(context.filesDir)) {
+                    onStatus("ASR local: preparando Whisper Tiny INT8 (~99 MB, solo la primera vez)…")
+                    val dl = ModelDownloader(
+                        ModelCatalog.modelRoot(context.filesDir),
+                        onStatus = { s ->
+                            if (generation.get() == ticket && s.contains("asr_whisper_tiny")) {
+                                onStatus("ASR local · $s")
+                            }
+                        },
+                        onProgress = { }
+                    )
+                    dl.downloadAll()
+                }
+                if (generation.get() != ticket) return@execute
+                require(ModelCatalog.isAsrComplete(context.filesDir)) {
+                    "El pack Whisper local no quedó completo"
+                }
+
+                onStatus("ASR local: Whisper Tiny INT8 · Español · transcribiendo WAV…")
                 val dir = ModelCatalog.asrDir(context.filesDir)
                 val wav = WavIO.readPcm16(wavFile)
-                if (generation.get() != ticket) return@execute
 
                 val modelConfig = OfflineModelConfig(
                     whisper = OfflineWhisperModelConfig(
