@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.8.0-background-asr-persist"
+        versionCode = 12
+        versionName = "0.9.0-local-whisper-asr"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -63,6 +63,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            // sherpa-onnx and ORT Java both ship libonnxruntime.so. Keep a single copy.
+            pickFirsts += setOf("**/libonnxruntime.so")
         }
         resources {
             excludes += setOf(
@@ -79,4 +81,5 @@ android {
 dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
+    implementation("com.k2fsa.sherpa.onnx:sherpa-onnx-android:1.13.8")
 }
