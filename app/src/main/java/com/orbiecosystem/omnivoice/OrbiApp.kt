@@ -10,15 +10,15 @@ class OrbiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         appContext = applicationContext
+
+        // Whisper runs in its own :asr process. Do not execute main-process UI/session setup there.
+        if (Application.getProcessName() != packageName) return
+
+        // Generated audio belongs only to the current process/session. Reference audio, transcript
+        // and synthesis settings intentionally remain persistent.
         clearTransientOutputs()
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
-                // A newly-created UI session must never resurrect a clone/TTS/codec result from a
-                // previous screen instance. Reference audio, transcript and synthesis settings remain.
-                clearTransientOutputs()
-            }
-
             override fun onActivityStarted(activity: Activity) {
                 InferenceKeepAliveService.start(this@OrbiApp)
             }
@@ -33,12 +33,13 @@ class OrbiApp : Application() {
     }
 
     private fun clearTransientOutputs() {
+        // commit() is intentional here: Activity creation must never race an asynchronous apply().
         getSharedPreferences("orbi_omnivoice_session", MODE_PRIVATE)
             .edit()
             .remove("clone_output")
             .remove("auto_output")
             .remove("codec_output")
-            .apply()
+            .commit()
     }
 
     companion object {
