@@ -63,7 +63,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
-            // sherpa-onnx and ORT Java both ship libonnxruntime.so. Keep a single copy.
             pickFirsts += setOf("**/libonnxruntime.so")
         }
         resources {
@@ -81,5 +80,5 @@ android {
 dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
-    implementation("com.k2fsa.sherpa.onnx:sherpa-onnx-android:1.13.8")
+    implementation(files("libs/sherpa-onnx-1.13.8.aar"))
 }
