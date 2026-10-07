@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.9.5-asr-runtime-aligned"
+        versionCode = 18
+        versionName = "0.9.6-asr-stable-session-outputs"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
