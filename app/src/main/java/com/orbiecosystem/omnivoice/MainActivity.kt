@@ -12,18 +12,17 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import java.io.File
-import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
-    private val work = Executors.newSingleThreadExecutor()
+    private val work get() = OrbiApp.work
     private val recorder = ReferenceRecorder()
+    private val prefs by lazy { getSharedPreferences("orbi_omnivoice_session", MODE_PRIVATE) }
+
     private var referenceFile: File? = null
     private var outputFile: File? = null
     private var autoVoiceFile: File? = null
     private var roundTripFile: File? = null
-    private var engine: OmniVoiceEngine? = null
-    private var roundTripEngine: HiggsRoundTrip? = null
     private var downloader: ModelDownloader? = null
     private var player: MediaPlayer? = null
     private var isRecording = false
@@ -60,20 +59,36 @@ class MainActivity : Activity() {
         setContentView(buildUi())
         showDevice()
         refreshModelState()
+
         asrController = ReferenceAsrController(
             context = this,
-            onStatus = { message -> runOnUiThread { updateAsrStatus(message) } },
+            onStatus = { message -> ui { updateAsrStatus(message) } },
             onTranscript = { text, finalResult ->
-                runOnUiThread {
-                    if (!finalResult && refText.hasFocus()) return@runOnUiThread
+                ui {
+                    if (!finalResult && refText.hasFocus()) return@ui
                     refText.setText(text)
                     refText.setSelection(refText.text.length)
+                    prefs.edit().putString(KEY_REF_TEXT, text).apply()
                     if (finalResult) {
-                        updateAsrStatus("Transcripción automática lista · revisa y corrige solo si hace falta")
+                        updateAsrStatus("ASR: transcripción automática lista · revisa y corrige solo si hace falta")
                     }
                 }
             }
         )
+
+        restoreSession()
+        InferenceKeepAliveService.start(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        restoreGeneratedOutputs()
+        InferenceKeepAliveService.start(this)
+    }
+
+    override fun onPause() {
+        persistUiState()
+        super.onPause()
     }
 
     private fun versionName(): String = try {
@@ -92,7 +107,7 @@ class MainActivity : Activity() {
         scroll.addView(root)
 
         root.addView(text("ORBI OmniVoice Edge Lab", 26f, true))
-        root.addView(text("Android ${versionName()} · Español (es) + transcripción automática editable", 14f, false))
+        root.addView(text("Android ${versionName()} · Español (es) · AUTO · background guard", 14f, false))
         root.addView(space(10))
 
         root.addView(section("1 · Device Readiness"))
@@ -152,9 +167,9 @@ class MainActivity : Activity() {
 
         refText = edit("Transcripción de referencia · automática y editable", 3)
         root.addView(refText)
-        asrStatus = text("ASR: al grabar intentará transcribir automáticamente en Español Latino.", 12f, false)
+        asrStatus = text("ASR: se ejecuta después de detener la grabación, sin competir por el micrófono.", 12f, false)
         root.addView(asrStatus)
-        root.addView(text("Recomendado: 5–8 s, voz limpia, sin música. Revisa el texto y corrige solo si una palabra quedó mal.", 12f, false))
+        root.addView(text("Recomendado: 5–8 s, voz limpia, sin música. Corrige solo si una palabra quedó mal.", 12f, false))
 
         val diagnosticRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         roundTrip = Button(this).apply {
@@ -236,10 +251,10 @@ class MainActivity : Activity() {
 
         root.addView(space(14))
         root.addView(text(
-            "Flujo normal: grabar → transcripción automática editable → AUTO → clonar. " +
-                "TEST CODEC queda solo como diagnóstico. Las salidas WAV se publican en Descargas/ORBI OmniVoice.\n\n" +
-                "ASR: usa reconocimiento on-device cuando Android lo ofrece; si no, usa el reconocedor del sistema con preferencia offline. " +
-                "Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
+            "Flujo normal: grabar → detener → ASR del WAV → revisar texto → AUTO → clonar. " +
+                "La inferencia usa un worker de aplicación y un servicio visible para seguir viva al cambiar de app. " +
+                "Las salidas WAV se publican en Descargas/ORBI OmniVoice.\n\n" +
+                "TEST CODEC queda solo como diagnóstico. Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
             12f, false
         ))
 
@@ -283,19 +298,19 @@ class MainActivity : Activity() {
         progress.visibility = View.VISIBLE
         downloader = ModelDownloader(
             ModelCatalog.modelRoot(filesDir),
-            onStatus = { s -> runOnUiThread { appendStatus(s) } },
-            onProgress = { p -> runOnUiThread { progress.progress = p } }
+            onStatus = { s -> ui { appendStatus(s) } },
+            onProgress = { p -> ui { progress.progress = p } }
         )
         work.execute {
             try {
                 downloader!!.downloadAll()
-                runOnUiThread {
+                ui {
                     setInferenceButtons(true)
                     progress.visibility = View.GONE
                     refreshModelState()
                 }
             } catch (t: Throwable) {
-                runOnUiThread {
+                ui {
                     setInferenceButtons(true)
                     progress.visibility = View.GONE
                     appendStatus("DOWNLOAD ERROR: ${t.message}")
@@ -311,6 +326,7 @@ class MainActivity : Activity() {
             return
         }
         try {
+            asrController?.cancel()
             refText.setText("")
             recorder.start()
             isRecording = true
@@ -320,13 +336,11 @@ class MainActivity : Activity() {
             roundTrip.isEnabled = false
             appendStatus("Grabando referencia… habla 5–8 segundos.")
             refLabel.text = "Referencia: GRABANDO…"
-            updateAsrStatus("ASR: iniciando transcripción automática…")
-            asrController?.start()
+            updateAsrStatus("ASR: esperando a que termines la grabación para transcribir el WAV…")
         } catch (t: Throwable) {
             isRecording = false
             recButton.isEnabled = true
             stopButton.isEnabled = false
-            asrController?.cancel()
             appendStatus("REC ERROR: ${t.message}")
         }
     }
@@ -342,12 +356,10 @@ class MainActivity : Activity() {
             val saved = recorder.stopToWav(f)
             require(saved.isFile && saved.length() > 44) { "La grabación WAV no se creó correctamente" }
             setReference(saved, "Referencia guardada")
-            asrController?.stop()
-            if (refText.text.toString().isBlank()) {
-                updateAsrStatus("ASR: esperando resultado… si no aparece texto, escríbelo manualmente")
-            }
+            prefs.edit().putString(KEY_REFERENCE, saved.absolutePath).apply()
+            updateAsrStatus("ASR: transcribiendo la referencia guardada…")
+            asrController?.transcribeFile(saved)
         } catch (t: Throwable) {
-            asrController?.cancel()
             appendStatus("STOP REC ERROR: ${t.message}")
         } finally {
             isRecording = false
@@ -402,17 +414,19 @@ class MainActivity : Activity() {
                 f.outputStream().use { input.copyTo(it) }
             }
             val w = WavIO.readPcm16(f)
-            runOnUiThread {
+            ui {
                 referenceFile = f
                 val sec = w.samples.size.toFloat() / w.sampleRate
                 refLabel.text = "Referencia: ${f.name} · %.1f s".format(sec)
                 playReference.isEnabled = true
                 roundTrip.isEnabled = ModelCatalog.isComplete(filesDir)
-                updateAsrStatus("ASR automático en esta build se ejecuta durante una grabación nueva; para WAV importado revisa/escribe la transcripción manualmente")
+                prefs.edit().putString(KEY_REFERENCE, f.absolutePath).apply()
+                updateAsrStatus("ASR: transcribiendo WAV importado…")
+                asrController?.transcribeFile(f)
                 appendStatus("WAV importado · %.1f s · ${w.sampleRate} Hz".format(sec))
             }
         } catch (t: Throwable) {
-            runOnUiThread { appendStatus("IMPORT ERROR: ${t.message}") }
+            ui { appendStatus("IMPORT ERROR: ${t.message}") }
         }
     }
 
@@ -433,30 +447,28 @@ class MainActivity : Activity() {
         appendStatus("ROUND-TRIP START · $selectedBackend")
 
         work.execute {
+            val local = HiggsRoundTrip(filesDir, selectedBackend) { s -> ui { appendStatus(s) } }
             try {
-                roundTripEngine?.close()
-                roundTripEngine = HiggsRoundTrip(filesDir, selectedBackend) { s ->
-                    runOnUiThread { appendStatus(s) }
-                }
-                val stats = roundTripEngine!!.run(ref, out)
+                val stats = local.run(ref, out)
                 roundTripFile = stats.outputFile
-                runOnUiThread {
+                prefs.edit().putString(KEY_CODEC_OUTPUT, stats.outputFile.absolutePath).apply()
+                ui {
                     roundTrip.isEnabled = true
                     playRoundTrip.isEnabled = true
                     appendStatus(
-                        "ROUND-TRIP READY\n" +
-                            "frames=${stats.frames}\n" +
-                            "encode=${stats.encodeMs} ms\n" +
-                            "decode=${stats.decodeMs} ms\n" +
-                            "total=${stats.totalMs} ms\n" +
+                        "ROUND-TRIP READY\nframes=${stats.frames}\nencode=${stats.encodeMs} ms\n" +
+                            "decode=${stats.decodeMs} ms\ntotal=${stats.totalMs} ms\n" +
                             "input=%.2f s · output=%.2f s".format(stats.inputSeconds, stats.outputSeconds)
                     )
                 }
             } catch (t: Throwable) {
-                runOnUiThread {
+                ui {
                     roundTrip.isEnabled = true
                     appendStatus("ROUND-TRIP ERROR: ${t.javaClass.simpleName}: ${t.message}")
                 }
+            } finally {
+                try { local.close() } catch (_: Throwable) {}
+                System.gc()
             }
         }
     }
@@ -513,6 +525,7 @@ class MainActivity : Activity() {
             return
         }
 
+        persistUiState()
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
         val estimate = estimateAuto(target)
@@ -524,37 +537,36 @@ class MainActivity : Activity() {
 
         setInferenceButtons(false)
         playAuto.isEnabled = false
-        appendStatus("AUTO START · Español(es) · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        appendStatus("AUTO START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        InferenceKeepAliveService.update(this, "Generando TTS local · puedes cambiar de aplicación")
 
         work.execute {
+            val local = OmniVoiceEngine(filesDir, selectedBackend) { s -> ui { appendStatus(s) } }
             try {
-                engine?.close()
-                engine = OmniVoiceEngine(filesDir, selectedBackend) { s ->
-                    runOnUiThread { appendStatus(s) }
-                }
-                val stats = engine!!.generateAutoVoice(target, nSteps, estimate.seconds, raw)
+                val stats = local.generateAutoVoice(target, nSteps, estimate.seconds, raw)
                 val cleanSeconds = postProcess(raw, finalOut)
                 autoVoiceFile = finalOut
-                runOnUiThread {
+                prefs.edit().putString(KEY_AUTO_OUTPUT, finalOut.absolutePath).apply()
+                ui {
                     setInferenceButtons(true)
                     playAuto.isEnabled = true
                     appendStatus(
-                        "AUTO SUCCESS\n" +
-                            "backend=${stats.backend}\nsteps=${stats.steps}\n" +
-                            "genFrames=${stats.frames}\n" +
-                            "generation=${stats.generationMs} ms\n" +
-                            "decode=${stats.decodeMs} ms\n" +
-                            "total=${stats.totalMs} ms\n" +
-                            "raw=%.2f s · clean=%.2f s\n".format(stats.outputSeconds, cleanSeconds) +
-                            "WAV público: Descargas/ORBI OmniVoice/${finalOut.name.replaceFirst("auto_voice_", "ORBI_TTS_")}" 
+                        "AUTO SUCCESS\nbackend=${stats.backend}\nsteps=${stats.steps}\n" +
+                            "genFrames=${stats.frames}\ngeneration=${stats.generationMs} ms\n" +
+                            "decode=${stats.decodeMs} ms\ntotal=${stats.totalMs} ms\n" +
+                            "raw=%.2f s · clean=%.2f s".format(stats.outputSeconds, cleanSeconds)
                     )
                 }
             } catch (t: Throwable) {
                 raw.delete()
-                runOnUiThread {
+                ui {
                     setInferenceButtons(true)
                     appendStatus("AUTO INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
                 }
+            } finally {
+                try { local.close() } catch (_: Throwable) {}
+                System.gc()
+                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI OmniVoice activo · listo")
             }
         }
     }
@@ -575,7 +587,7 @@ class MainActivity : Activity() {
         val refTx = refText.text.toString().trim()
         val target = targetText.text.toString().trim()
         if (refTx.isBlank()) {
-            toast("La transcripción de referencia está vacía. Espera al ASR o escríbela/corrígela manualmente.")
+            toast("Espera la transcripción automática o escribe/corrige la referencia.")
             return
         }
         if (target.isBlank()) {
@@ -583,6 +595,7 @@ class MainActivity : Activity() {
             return
         }
 
+        persistUiState()
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
         val estimate = estimateClone(target, refTx, ref)
@@ -594,38 +607,37 @@ class MainActivity : Activity() {
 
         setInferenceButtons(false)
         play.isEnabled = false
-        appendStatus("CLONE START · Español(es) · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        appendStatus("CLONE START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
+        InferenceKeepAliveService.update(this, "Clonando voz localmente · puedes cambiar de aplicación")
 
         work.execute {
+            val local = OmniVoiceEngine(filesDir, selectedBackend) { s -> ui { appendStatus(s) } }
             try {
-                engine?.close()
-                engine = OmniVoiceEngine(filesDir, selectedBackend) { s ->
-                    runOnUiThread { appendStatus(s) }
-                }
-                val stats = engine!!.generate(ref, refTx, target, nSteps, estimate.seconds, raw)
+                val stats = local.generate(ref, refTx, target, nSteps, estimate.seconds, raw)
                 val cleanSeconds = postProcess(raw, finalOut)
                 outputFile = finalOut
-                runOnUiThread {
+                prefs.edit().putString(KEY_CLONE_OUTPUT, finalOut.absolutePath).apply()
+                ui {
                     setInferenceButtons(true)
                     play.isEnabled = true
                     appendStatus(
-                        "CLONE SUCCESS\n" +
-                            "backend=${stats.backend}\nsteps=${stats.steps}\n" +
+                        "CLONE SUCCESS\nbackend=${stats.backend}\nsteps=${stats.steps}\n" +
                             "refFrames=${stats.referenceFrames}\ngenFrames=${stats.frames}\n" +
                             "refEncode=${stats.referenceEncodeMs} ms\n" +
-                            "generation=${stats.generationMs} ms\n" +
-                            "decode=${stats.decodeMs} ms\n" +
-                            "total=${stats.totalMs} ms\n" +
-                            "raw=%.2f s · clean=%.2f s\n".format(stats.outputSeconds, cleanSeconds) +
-                            "WAV público: Descargas/ORBI OmniVoice/${finalOut.name.replaceFirst("orbi_omnivoice_", "ORBI_CLONE_")}" 
+                            "generation=${stats.generationMs} ms\ndecode=${stats.decodeMs} ms\n" +
+                            "total=${stats.totalMs} ms\nraw=%.2f s · clean=%.2f s".format(stats.outputSeconds, cleanSeconds)
                     )
                 }
             } catch (t: Throwable) {
                 raw.delete()
-                runOnUiThread {
+                ui {
                     setInferenceButtons(true)
                     appendStatus("CLONE INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
                 }
+            } finally {
+                try { local.close() } catch (_: Throwable) {}
+                System.gc()
+                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI OmniVoice activo · listo")
             }
         }
     }
@@ -636,6 +648,10 @@ class MainActivity : Activity() {
             player?.release()
             player = MediaPlayer().apply {
                 setDataSource(file.absolutePath)
+                setOnCompletionListener {
+                    try { it.release() } catch (_: Throwable) {}
+                    player = null
+                }
                 prepare()
                 start()
             }
@@ -645,9 +661,74 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun persistUiState() {
+        val editor = prefs.edit()
+            .putString(KEY_REF_TEXT, if (::refText.isInitialized) refText.text.toString() else "")
+            .putString(KEY_TARGET, if (::targetText.isInitialized) targetText.text.toString() else "")
+        referenceFile?.let { editor.putString(KEY_REFERENCE, it.absolutePath) }
+        outputFile?.let { editor.putString(KEY_CLONE_OUTPUT, it.absolutePath) }
+        autoVoiceFile?.let { editor.putString(KEY_AUTO_OUTPUT, it.absolutePath) }
+        roundTripFile?.let { editor.putString(KEY_CODEC_OUTPUT, it.absolutePath) }
+        if (::backend.isInitialized) editor.putString(KEY_BACKEND, backend.selectedItem.toString())
+        if (::steps.isInitialized) editor.putString(KEY_STEPS, steps.selectedItem.toString())
+        if (::duration.isInitialized) editor.putString(KEY_DURATION, duration.selectedItem.toString())
+        if (::speed.isInitialized) editor.putString(KEY_SPEED, speed.selectedItem.toString())
+        editor.apply()
+    }
+
+    private fun restoreSession() {
+        prefs.getString(KEY_REF_TEXT, null)?.let { refText.setText(it) }
+        prefs.getString(KEY_TARGET, null)?.let { targetText.setText(it) }
+        selectSpinner(backend, prefs.getString(KEY_BACKEND, "CPU"))
+        selectSpinner(steps, prefs.getString(KEY_STEPS, "32"))
+        selectSpinner(duration, prefs.getString(KEY_DURATION, "AUTO"))
+        selectSpinner(speed, prefs.getString(KEY_SPEED, "1.00"))
+
+        prefs.getString(KEY_REFERENCE, null)?.let { path ->
+            val f = File(path)
+            if (f.isFile) setReference(f, "Referencia restaurada")
+        }
+        val savedStatus = prefs.getString(KEY_STATUS, null)
+        if (!savedStatus.isNullOrBlank()) status.text = savedStatus
+        restoreGeneratedOutputs()
+    }
+
+    private fun restoreGeneratedOutputs() {
+        outputFile = restoreFile(KEY_CLONE_OUTPUT)
+        autoVoiceFile = restoreFile(KEY_AUTO_OUTPUT)
+        roundTripFile = restoreFile(KEY_CODEC_OUTPUT)
+        if (::play.isInitialized) play.isEnabled = outputFile?.isFile == true
+        if (::playAuto.isInitialized) playAuto.isEnabled = autoVoiceFile?.isFile == true
+        if (::playRoundTrip.isInitialized) playRoundTrip.isEnabled = roundTripFile?.isFile == true
+    }
+
+    private fun restoreFile(key: String): File? {
+        val path = prefs.getString(key, null) ?: return null
+        return File(path).takeIf { it.isFile }
+    }
+
+    private fun selectSpinner(spinner: Spinner, value: String?) {
+        if (value == null) return
+        for (i in 0 until spinner.adapter.count) {
+            if (spinner.adapter.getItem(i).toString() == value) {
+                spinner.setSelection(i)
+                return
+            }
+        }
+    }
+
     private fun appendStatus(s: String) {
         val lines = (status.text.toString() + "\n" + s).lines()
-        status.text = lines.takeLast(100).joinToString("\n")
+        val tail = lines.takeLast(110).joinToString("\n")
+        status.text = tail
+        prefs.edit().putString(KEY_STATUS, tail).apply()
+    }
+
+    private fun ui(block: () -> Unit) {
+        if (isFinishing || isDestroyed) return
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) block()
+        }
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
@@ -694,13 +775,25 @@ class MainActivity : Activity() {
     private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        persistUiState()
         asrController?.cancel()
         downloader?.cancel()
         recorder.cancel()
-        engine?.close()
-        roundTripEngine?.close()
         player?.release()
-        work.shutdownNow()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val KEY_REFERENCE = "reference_path"
+        private const val KEY_REF_TEXT = "reference_text"
+        private const val KEY_TARGET = "target_text"
+        private const val KEY_CLONE_OUTPUT = "clone_output"
+        private const val KEY_AUTO_OUTPUT = "auto_output"
+        private const val KEY_CODEC_OUTPUT = "codec_output"
+        private const val KEY_BACKEND = "backend"
+        private const val KEY_STEPS = "steps"
+        private const val KEY_DURATION = "duration"
+        private const val KEY_SPEED = "speed"
+        private const val KEY_STATUS = "status"
     }
 }
