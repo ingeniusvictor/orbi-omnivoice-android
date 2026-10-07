@@ -21,8 +21,9 @@ class ModelDownloader(
         cancelled.set(false)
         rootDir.mkdirs()
 
-        val totalFiles = ModelCatalog.files.size
-        ModelCatalog.files.forEachIndexed { index, spec ->
+        val specs = ModelCatalog.allFiles
+        val totalFiles = specs.size
+        specs.forEachIndexed { index, spec ->
             if (cancelled.get()) error("Descarga cancelada")
             val target = File(rootDir, spec.relativePath)
             if (target.isFile && target.length() >= spec.minBytes) {
@@ -98,7 +99,7 @@ class ModelDownloader(
         c.instanceFollowRedirects = true
         c.connectTimeout = 30_000
         c.readTimeout = 60_000
-        c.setRequestProperty("User-Agent", "ORBI-OmniVoice-EdgeLab/0.3")
+        c.setRequestProperty("User-Agent", "ORBI-OmniVoice-EdgeLab/0.9")
         if (offset > 0) c.setRequestProperty("Range", "bytes=$offset-")
         c.connect()
         return c
