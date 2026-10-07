@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.9.6-asr-stable-session-outputs"
+        versionCode = 19
+        versionName = "0.9.7-asr-symbol-aligned-session"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -77,8 +77,8 @@ android {
 }
 
 dependencies {
-    // OmniVoice uses ORT 1.30.0. CI rebuilds sherpa JNI against that exact runtime and stages
-    // the API-compatible AAR at app/libs/sherpa-onnx-1.13.8.aar before Gradle runs.
+    // OmniVoice uses ORT 1.30.0. CI rebuilds sherpa JNI against that exact runtime and gates
+    // the OrtGetApiBase symbol version before packaging.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
