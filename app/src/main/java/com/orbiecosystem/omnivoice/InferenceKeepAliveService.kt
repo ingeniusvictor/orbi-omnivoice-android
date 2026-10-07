@@ -10,8 +10,12 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 class InferenceKeepAliveService : Service() {
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var inferenceActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -23,22 +27,72 @@ class InferenceKeepAliveService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val message = intent?.getStringExtra(EXTRA_MESSAGE)
             ?: "ORBI OmniVoice activo · inferencia protegida en segundo plano"
+
+        val shouldHoldCpu = isInferenceMessage(message)
+        if (shouldHoldCpu) {
+            inferenceActive = true
+            acquireCpuWakeLock()
+        } else if (isIdleMessage(message)) {
+            inferenceActive = false
+            releaseCpuWakeLock()
+        }
+
         promote(message)
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        // Do NOT stop the service while inference is active. On HyperOS/Android, the task/UI can
+        // disappear or the display can lock while a long CPU inference is still running.
+        if (!inferenceActive) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        releaseCpuWakeLock()
         running = false
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun acquireCpuWakeLock() {
+        val existing = wakeLock
+        if (existing?.isHeld == true) return
+
+        val pm = getSystemService(PowerManager::class.java)
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:OmniVoiceInference"
+        ).apply {
+            setReferenceCounted(false)
+            // Safety timeout. A normal clone on the POCO is only a few minutes, but allow enough
+            // headroom for long text / reduced CPU frequency with the screen off.
+            acquire(WAKELOCK_TIMEOUT_MS)
+        }
+    }
+
+    private fun releaseCpuWakeLock() {
+        try {
+            wakeLock?.takeIf { it.isHeld }?.release()
+        } catch (_: Throwable) {
+        } finally {
+            wakeLock = null
+        }
+    }
+
+    private fun isInferenceMessage(message: String): Boolean {
+        val m = message.lowercase()
+        return m.contains("clonando") || m.contains("generando tts") || m.contains("inferencia en curso")
+    }
+
+    private fun isIdleMessage(message: String): Boolean {
+        val m = message.lowercase()
+        return m.contains("· listo") || m.endsWith("listo") || m.contains("inferencia finalizada")
+    }
 
     private fun promote(message: String) {
         val notification = buildNotification(message)
@@ -60,7 +114,7 @@ class InferenceKeepAliveService : Service() {
             "ORBI OmniVoice inference",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Mantiene la inferencia local activa cuando cambias de aplicación"
+            description = "Mantiene activa la inferencia local incluso con la pantalla apagada"
             setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
@@ -92,6 +146,7 @@ class InferenceKeepAliveService : Service() {
         private const val CHANNEL_ID = "orbi_omnivoice_inference"
         private const val NOTIFICATION_ID = 2307
         private const val EXTRA_MESSAGE = "message"
+        private const val WAKELOCK_TIMEOUT_MS = 30L * 60L * 1000L
 
         @Volatile
         private var running = false
