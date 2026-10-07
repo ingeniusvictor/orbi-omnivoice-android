@@ -16,58 +16,23 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK 36 and NDK
+      - name: Install Android SDK 36
         shell: bash
         run: |
           SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;27.2.12479018"
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Cache ORT-aligned sherpa AAR
-        id: sherpa-cache
-        uses: actions/cache@v4
-        with:
-          path: ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar
-          key: sherpa-onnx-v1.13.8-ort1.30.0-arm64-shared-v2-symbol-gated
-
-      - name: Build sherpa-onnx AAR against ONNX Runtime 1.30.0
-        if: steps.sherpa-cache.outputs.cache-hit != 'true'
+      - name: Build isolated official Sherpa AAR
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /tmp/sherpa-onnx /tmp/sherpa-aar
-          git clone --depth 1 --branch v1.13.8 --recursive --shallow-submodules \
-            https://github.com/k2-fsa/sherpa-onnx.git /tmp/sherpa-onnx
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
 
-          export ANDROID_NDK="${ANDROID_HOME}/ndk/27.2.12479018"
-          export BUILD_SHARED_LIBS=ON
-          export SHERPA_ONNX_ONNXRUNTIME_VERSION=1.30.0
-          export SHERPA_ONNX_ENABLE_TTS=OFF
-          export SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=OFF
-          export SHERPA_ONNX_ENABLE_BINARY=OFF
-          export SHERPA_ONNX_ENABLE_C_API=OFF
-
-          pushd /tmp/sherpa-onnx
-          ./build-android-arm64-v8a.sh
-          popd
-
-          SHERPA_LIB=/tmp/sherpa-onnx/build-android-arm64-v8a/install/lib/libsherpa-onnx-jni.so
-          ORT_LIB=/tmp/sherpa-onnx/build-android-arm64-v8a/install/lib/libonnxruntime.so
-          test -f "$SHERPA_LIB"
-          test -f "$ORT_LIB"
-          echo 'Sherpa required ORT symbol:'
-          readelf -Ws "$SHERPA_LIB" | grep 'OrtGetApiBase'
-          readelf -Ws "$SHERPA_LIB" | grep -q 'OrtGetApiBase@VERS_1.30.0'
-          echo 'Bundled ORT exported symbol:'
-          readelf -Ws "$ORT_LIB" | grep 'OrtGetApiBase'
-          readelf -Ws "$ORT_LIB" | grep -q 'OrtGetApiBase@@VERS_1.30.0'
-
-          mkdir -p /tmp/sherpa-aar app/libs ci-cache
+          rm -rf /tmp/sherpa-official.aar /tmp/sherpa-aar
+          mkdir -p /tmp/sherpa-aar app/libs
           curl -fL --retry 3 \
             -o /tmp/sherpa-official.aar \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
@@ -75,33 +40,26 @@ jobs:
 
           cd /tmp/sherpa-aar
           unzip -q /tmp/sherpa-official.aar
-          rm -rf jni
-          mkdir -p jni/arm64-v8a
 
-          # Java/Kotlin API from the official AAR, native JNI freshly built against ORT 1.30.0.
-          find /tmp/sherpa-onnx/build-android-arm64-v8a/install/lib -maxdepth 1 -type f -name '*.so' \
-            ! -name 'libonnxruntime.so' -exec cp -v {} jni/arm64-v8a/ \;
+          # Edge Lab is arm64-only. Keep the official Sherpa native stack that already proved
+          # transcription on the POCO, but rename its private ORT so OmniVoice can retain 1.30.0.
+          find jni -mindepth 1 -maxdepth 1 -type d ! -name 'arm64-v8a' -exec rm -rf {} +
+          cd jni/arm64-v8a
+          test -f libonnxruntime.so
+          mv libonnxruntime.so libsherpa_onnxruntime.so
+          rm -f libonnxruntime4j_jni.so
+          patchelf --set-soname libsherpa_onnxruntime.so libsherpa_onnxruntime.so
 
-          jar tf classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
-          test -f jni/arm64-v8a/libsherpa-onnx-jni.so
-          readelf -Ws jni/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
+          for so in *.so; do
+            [ "$so" = "libsherpa_onnxruntime.so" ] && continue
+            if patchelf --print-needed "$so" | grep -qx 'libonnxruntime.so'; then
+              patchelf --replace-needed libonnxruntime.so libsherpa_onnxruntime.so "$so"
+            fi
+          done
 
-          zip -qr /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar .
-          cp /tmp/sherpa-onnx-1.13.8-ort130-arm64.aar \
-            "${GITHUB_WORKSPACE}/ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar"
-
-      - name: Stage ORT-aligned sherpa AAR
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p app/libs
-          cp ci-cache/sherpa-onnx-1.13.8-ort130-arm64.aar app/libs/sherpa-onnx-1.13.8.aar
-          unzip -p app/libs/sherpa-onnx-1.13.8.aar classes.jar > /tmp/sherpa-classes.jar
-          jar tf /tmp/sherpa-classes.jar | grep -q 'com/k2fsa/sherpa/onnx/OfflineRecognizer.class'
-          unzip -p app/libs/sherpa-onnx-1.13.8.aar jni/arm64-v8a/libsherpa-onnx-jni.so > /tmp/libsherpa-onnx-jni.so
-          echo 'Staged sherpa ORT symbol requirement:'
-          readelf -Ws /tmp/libsherpa-onnx-jni.so | grep 'OrtGetApiBase'
-          readelf -Ws /tmp/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
+          patchelf --print-needed libsherpa-onnx-jni.so | grep -qx 'libsherpa_onnxruntime.so'
+          cd /tmp/sherpa-aar
+          zip -qr "${GITHUB_WORKSPACE}/app/libs/sherpa-onnx-1.13.8.aar" .
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -110,7 +68,7 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify ASR classes and ONNX Runtime alignment
+      - name: Verify isolated ASR and OmniVoice native stacks
         shell: bash
         run: |
           set -euo pipefail
@@ -120,17 +78,18 @@ jobs:
           unzip -q "$APK" \
             'lib/arm64-v8a/libonnxruntime.so' \
             'lib/arm64-v8a/libonnxruntime4j_jni.so' \
+            'lib/arm64-v8a/libsherpa_onnxruntime.so' \
             'lib/arm64-v8a/libsherpa-onnx-jni.so' \
             -d /tmp/orbi-apk-check
 
-          echo 'libonnxruntime.so:'
-          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep 'OrtGetApiBase'
-          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep -q 'OrtGetApiBase@@VERS_1.30.0'
-          echo 'libonnxruntime4j_jni.so dependency:'
-          readelf -d /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime4j_jni.so | grep 'libonnxruntime.so'
-          echo 'sherpa JNI required ORT symbol:'
-          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep 'OrtGetApiBase'
-          readelf -Ws /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep -q 'OrtGetApiBase@VERS_1.30.0'
+          echo 'OmniVoice ORT:'
+          strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime.so | grep -m1 -E '^1\.30\.'
+          echo 'OmniVoice Java/JNI:'
+          strings /tmp/orbi-apk-check/lib/arm64-v8a/libonnxruntime4j_jni.so | grep -m1 -E '^1\.30\.'
+          echo 'Sherpa private ORT:'
+          strings /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa_onnxruntime.so | grep -m1 -E '^1\.'
+          echo 'Sherpa JNI dependency:'
+          patchelf --print-needed /tmp/orbi-apk-check/lib/arm64-v8a/libsherpa-onnx-jni.so | grep -qx 'libsherpa_onnxruntime.so'
 
           found=0
           while IFS= read -r dex; do
