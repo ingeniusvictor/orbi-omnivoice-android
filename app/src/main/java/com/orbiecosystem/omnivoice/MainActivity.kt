@@ -8,6 +8,9 @@ import android.graphics.Color
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -27,6 +30,17 @@ class MainActivity : Activity() {
     private var player: MediaPlayer? = null
     private var isRecording = false
     private var asrController: ReferenceAsrController? = null
+    private var lastInferenceMessage: String? = null
+
+    private val inferencePollHandler = Handler(Looper.getMainLooper())
+    private val inferencePoll = object : Runnable {
+        override fun run() {
+            syncInferenceState()
+            if (!isFinishing && !isDestroyed) {
+                inferencePollHandler.postDelayed(this, INFERENCE_POLL_MS)
+            }
+        }
+    }
 
     private lateinit var status: TextView
     private lateinit var deviceText: TextView
@@ -77,16 +91,18 @@ class MainActivity : Activity() {
         )
 
         restoreSession()
-        InferenceKeepAliveService.start(this)
+        syncInferenceState()
     }
 
     override fun onResume() {
         super.onResume()
-        restoreGeneratedOutputs()
-        InferenceKeepAliveService.start(this)
+        inferencePollHandler.removeCallbacks(inferencePoll)
+        syncInferenceState()
+        inferencePollHandler.postDelayed(inferencePoll, INFERENCE_POLL_MS)
     }
 
     override fun onPause() {
+        inferencePollHandler.removeCallbacks(inferencePoll)
         persistUiState()
         super.onPause()
     }
@@ -113,6 +129,22 @@ class MainActivity : Activity() {
         root.addView(section("1 · Device Readiness"))
         deviceText = TextView(this).apply { textSize = 14f }
         root.addView(deviceText)
+        val battery = Button(this).apply {
+            text = "Ajustes de batería / segundo plano"
+            setOnClickListener {
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                } catch (_: Throwable) {
+                    startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+            }
+        }
+        root.addView(battery)
         root.addView(space(12))
 
         root.addView(section("2 · Model Pack"))
@@ -252,7 +284,7 @@ class MainActivity : Activity() {
         root.addView(space(14))
         root.addView(text(
             "Flujo normal: grabar → detener → ASR del WAV → revisar texto → AUTO → clonar. " +
-                "La inferencia usa un worker de aplicación y un servicio visible para seguir viva al cambiar de app. " +
+                "La generación de voz corre en un servicio dedicado :inference, separado de la interfaz y protegido con Foreground Service + WakeLock. " +
                 "Las salidas WAV se publican en Descargas/ORBI Voice.\n\n" +
                 "TEST CODEC queda solo como diagnóstico. Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
             12f, false
@@ -264,7 +296,7 @@ class MainActivity : Activity() {
     private fun showDevice() {
         val d = DeviceInfo.read(this)
         deviceText.text = d.pretty() +
-            "\nPerfil: POCO X7 Pro / Dimensity 8400-Ultra. Backbone bidireccional en CPU correctness path."
+            "\nPerfil: POCO X7 Pro / Dimensity 8400-Ultra. Inferencia de voz: proceso dedicado :inference."
     }
 
     private fun refreshModelState() {
@@ -451,7 +483,6 @@ class MainActivity : Activity() {
             try {
                 val stats = local.run(ref, out)
                 roundTripFile = stats.outputFile
-                prefs.edit().putString(KEY_CODEC_OUTPUT, stats.outputFile.absolutePath).apply()
                 ui {
                     roundTrip.isEnabled = true
                     playRoundTrip.isEnabled = true
@@ -500,14 +531,6 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun postProcess(raw: File, finalFile: File): Float {
-        val wav = WavIO.readPcm16(raw)
-        val clean = AudioPostProcessor.process(wav.samples, wav.sampleRate)
-        WavIO.writePcm16(finalFile, clean, wav.sampleRate)
-        raw.delete()
-        return clean.size.toFloat() / wav.sampleRate
-    }
-
     private fun generationModeLabel(estimate: RuleDurationEstimator.Estimate): String {
         val speedLabel = if (estimate.source == "MANUAL") "speed=IGNORED" else "speed=${selectedSpeed()}x"
         val clamp = if (estimate.frames != estimate.unclampedFrames) " · clamp ${estimate.unclampedFrames}→${estimate.frames}" else ""
@@ -517,6 +540,10 @@ class MainActivity : Activity() {
     private fun generateAutoVoice() {
         if (!ModelCatalog.isComplete(filesDir)) {
             toast("Primero descarga el Model Pack.")
+            return
+        }
+        if (InferenceJobStore.read(this)?.state == InferenceJobStore.STATE_RUNNING) {
+            toast("Ya hay una generación activa en segundo plano.")
             return
         }
         val target = targetText.text.toString().trim()
@@ -529,45 +556,26 @@ class MainActivity : Activity() {
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
         val estimate = estimateAuto(target)
-        val stamp = System.currentTimeMillis()
-        val raw = File(filesDir, "outputs/raw_auto_voice_$stamp.wav")
-        val finalOut = File(filesDir, "outputs/auto_voice_$stamp.wav")
-        raw.parentFile?.mkdirs()
         autoVoiceFile = null
-
-        setInferenceButtons(false)
         playAuto.isEnabled = false
-        appendStatus("AUTO START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
-        InferenceKeepAliveService.update(this, "Generando TTS local · puedes cambiar de aplicación")
+        setInferenceButtons(false)
+        InferenceJobStore.clear(this)
+        lastInferenceMessage = null
+        appendStatus("TTS START · servicio dedicado · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
-        work.execute {
-            val local = OmniVoiceEngine(filesDir, selectedBackend) { s -> ui { appendStatus(s) } }
-            try {
-                val stats = local.generateAutoVoice(target, nSteps, estimate.seconds, raw)
-                val cleanSeconds = postProcess(raw, finalOut)
-                autoVoiceFile = finalOut
-                prefs.edit().putString(KEY_AUTO_OUTPUT, finalOut.absolutePath).apply()
-                ui {
-                    setInferenceButtons(true)
-                    playAuto.isEnabled = true
-                    appendStatus(
-                        "AUTO SUCCESS\nbackend=${stats.backend}\nsteps=${stats.steps}\n" +
-                            "genFrames=${stats.frames}\ngeneration=${stats.generationMs} ms\n" +
-                            "decode=${stats.decodeMs} ms\ntotal=${stats.totalMs} ms\n" +
-                            "raw=%.2f s · clean=%.2f s".format(stats.outputSeconds, cleanSeconds)
-                    )
-                }
-            } catch (t: Throwable) {
-                raw.delete()
-                ui {
-                    setInferenceButtons(true)
-                    appendStatus("AUTO INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
-                }
-            } finally {
-                try { local.close() } catch (_: Throwable) {}
-                System.gc()
-                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI Voice activo · listo")
-            }
+        try {
+            VoiceInferenceService.startTts(
+                context = this,
+                target = target,
+                backend = selectedBackend,
+                steps = nSteps,
+                seconds = estimate.seconds
+            )
+            inferencePollHandler.removeCallbacks(inferencePoll)
+            inferencePollHandler.postDelayed(inferencePoll, 250L)
+        } catch (t: Throwable) {
+            setInferenceButtons(true)
+            appendStatus("TTS START ERROR: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
@@ -578,6 +586,10 @@ class MainActivity : Activity() {
         }
         if (!ModelCatalog.isComplete(filesDir)) {
             toast("Primero descarga el Model Pack.")
+            return
+        }
+        if (InferenceJobStore.read(this)?.state == InferenceJobStore.STATE_RUNNING) {
+            toast("Ya hay una generación activa en segundo plano.")
             return
         }
         val ref = referenceFile ?: run {
@@ -599,45 +611,66 @@ class MainActivity : Activity() {
         val selectedBackend = Backend.valueOf(backend.selectedItem.toString())
         val nSteps = steps.selectedItem.toString().toInt()
         val estimate = estimateClone(target, refTx, ref)
-        val stamp = System.currentTimeMillis()
-        val raw = File(filesDir, "outputs/raw_orbi_omnivoice_$stamp.wav")
-        val finalOut = File(filesDir, "outputs/orbi_omnivoice_$stamp.wav")
-        raw.parentFile?.mkdirs()
         outputFile = null
-
-        setInferenceButtons(false)
         play.isEnabled = false
-        appendStatus("CLONE START · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
-        InferenceKeepAliveService.update(this, "Clonando voz localmente · puedes cambiar de aplicación")
+        setInferenceButtons(false)
+        InferenceJobStore.clear(this)
+        lastInferenceMessage = null
+        appendStatus("CLONE START · servicio dedicado · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
-        work.execute {
-            val local = OmniVoiceEngine(filesDir, selectedBackend) { s -> ui { appendStatus(s) } }
-            try {
-                val stats = local.generate(ref, refTx, target, nSteps, estimate.seconds, raw)
-                val cleanSeconds = postProcess(raw, finalOut)
-                outputFile = finalOut
-                prefs.edit().putString(KEY_CLONE_OUTPUT, finalOut.absolutePath).apply()
-                ui {
-                    setInferenceButtons(true)
-                    play.isEnabled = true
-                    appendStatus(
-                        "CLONE SUCCESS\nbackend=${stats.backend}\nsteps=${stats.steps}\n" +
-                            "refFrames=${stats.referenceFrames}\ngenFrames=${stats.frames}\n" +
-                            "refEncode=${stats.referenceEncodeMs} ms\n" +
-                            "generation=${stats.generationMs} ms\ndecode=${stats.decodeMs} ms\n" +
-                            "total=${stats.totalMs} ms\nraw=%.2f s · clean=%.2f s".format(stats.outputSeconds, cleanSeconds)
-                    )
+        try {
+            VoiceInferenceService.startClone(
+                context = this,
+                refPath = ref.absolutePath,
+                refText = refTx,
+                target = target,
+                backend = selectedBackend,
+                steps = nSteps,
+                seconds = estimate.seconds
+            )
+            inferencePollHandler.removeCallbacks(inferencePoll)
+            inferencePollHandler.postDelayed(inferencePoll, 250L)
+        } catch (t: Throwable) {
+            setInferenceButtons(true)
+            appendStatus("CLONE START ERROR: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    private fun syncInferenceState() {
+        if (!::status.isInitialized) return
+        val snapshot = InferenceJobStore.read(this) ?: return
+
+        when (snapshot.state) {
+            InferenceJobStore.STATE_RUNNING -> {
+                setInferenceButtons(false)
+                if (snapshot.message.isNotBlank() && snapshot.message != lastInferenceMessage) {
+                    appendStatus("BG · ${snapshot.message}")
+                    lastInferenceMessage = snapshot.message
                 }
-            } catch (t: Throwable) {
-                raw.delete()
-                ui {
-                    setInferenceButtons(true)
-                    appendStatus("CLONE INFERENCE ERROR: ${t.javaClass.simpleName}: ${t.message}")
+            }
+
+            InferenceJobStore.STATE_COMPLETED -> {
+                val result = snapshot.outputPath?.let(::File)?.takeIf { it.isFile }
+                if (snapshot.kind == InferenceJobStore.KIND_CLONE) {
+                    outputFile = result
+                    play.isEnabled = result != null
+                } else if (snapshot.kind == InferenceJobStore.KIND_TTS) {
+                    autoVoiceFile = result
+                    playAuto.isEnabled = result != null
                 }
-            } finally {
-                try { local.close() } catch (_: Throwable) {}
-                System.gc()
-                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI Voice activo · listo")
+                setInferenceButtons(true)
+                if (snapshot.message != lastInferenceMessage) {
+                    appendStatus("BG · ${snapshot.message}")
+                }
+                lastInferenceMessage = null
+                InferenceJobStore.clear(this)
+            }
+
+            InferenceJobStore.STATE_ERROR -> {
+                setInferenceButtons(true)
+                appendStatus("BG · ${snapshot.message}")
+                lastInferenceMessage = null
+                InferenceJobStore.clear(this)
             }
         }
     }
@@ -666,9 +699,6 @@ class MainActivity : Activity() {
             .putString(KEY_REF_TEXT, if (::refText.isInitialized) refText.text.toString() else "")
             .putString(KEY_TARGET, if (::targetText.isInitialized) targetText.text.toString() else "")
         referenceFile?.let { editor.putString(KEY_REFERENCE, it.absolutePath) }
-        outputFile?.let { editor.putString(KEY_CLONE_OUTPUT, it.absolutePath) }
-        autoVoiceFile?.let { editor.putString(KEY_AUTO_OUTPUT, it.absolutePath) }
-        roundTripFile?.let { editor.putString(KEY_CODEC_OUTPUT, it.absolutePath) }
         if (::backend.isInitialized) editor.putString(KEY_BACKEND, backend.selectedItem.toString())
         if (::steps.isInitialized) editor.putString(KEY_STEPS, steps.selectedItem.toString())
         if (::duration.isInitialized) editor.putString(KEY_DURATION, duration.selectedItem.toString())
@@ -690,21 +720,6 @@ class MainActivity : Activity() {
         }
         val savedStatus = prefs.getString(KEY_STATUS, null)
         if (!savedStatus.isNullOrBlank()) status.text = savedStatus
-        restoreGeneratedOutputs()
-    }
-
-    private fun restoreGeneratedOutputs() {
-        outputFile = restoreFile(KEY_CLONE_OUTPUT)
-        autoVoiceFile = restoreFile(KEY_AUTO_OUTPUT)
-        roundTripFile = restoreFile(KEY_CODEC_OUTPUT)
-        if (::play.isInitialized) play.isEnabled = outputFile?.isFile == true
-        if (::playAuto.isInitialized) playAuto.isEnabled = autoVoiceFile?.isFile == true
-        if (::playRoundTrip.isInitialized) playRoundTrip.isEnabled = roundTripFile?.isFile == true
-    }
-
-    private fun restoreFile(key: String): File? {
-        val path = prefs.getString(key, null) ?: return null
-        return File(path).takeIf { it.isFile }
     }
 
     private fun selectSpinner(spinner: Spinner, value: String?) {
@@ -775,6 +790,7 @@ class MainActivity : Activity() {
     private fun dp(x: Int): Int = (x * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        inferencePollHandler.removeCallbacks(inferencePoll)
         persistUiState()
         asrController?.cancel()
         downloader?.cancel()
@@ -787,13 +803,11 @@ class MainActivity : Activity() {
         private const val KEY_REFERENCE = "reference_path"
         private const val KEY_REF_TEXT = "reference_text"
         private const val KEY_TARGET = "target_text"
-        private const val KEY_CLONE_OUTPUT = "clone_output"
-        private const val KEY_AUTO_OUTPUT = "auto_output"
-        private const val KEY_CODEC_OUTPUT = "codec_output"
         private const val KEY_BACKEND = "backend"
         private const val KEY_STEPS = "steps"
         private const val KEY_DURATION = "duration"
         private const val KEY_SPEED = "speed"
         private const val KEY_STATUS = "status"
+        private const val INFERENCE_POLL_MS = 750L
     }
 }
