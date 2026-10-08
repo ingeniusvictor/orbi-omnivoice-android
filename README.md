@@ -1,105 +1,98 @@
-# ORBI OmniVoice Android Edge Lab
+# ORBI Voice
 
-Experimental Android **on-device voice-cloning** spike for ORBI Ecosystem.
+**ORBI Voice** es la aplicación de voz local de ORBI Ecosystem para clonación de voz, síntesis y procesamiento on-device en Android.
 
-## Goal
+El producto se presenta y se desarrolla bajo la marca **ORBI Voice**. La implementación experimental actual utiliza tecnologías y modelos de terceros —incluyendo OmniVoice para síntesis/clonación y Whisper/Sherpa-ONNX para transcripción local— que se mantienen identificados internamente por razones técnicas, de atribución y licencia.
 
-Prove true OmniVoice voice cloning on a modern Android phone without a PC/server after the model pack is downloaded.
+## Estado actual
 
-This spike intentionally uses **ONNX Runtime Android** and `onnx-community/OmniVoice-Onnx` rather than the incomplete 2-file LiteRT spike. The ONNX conversion includes:
+El prototipo Android ya demuestra en el POCO X7 Pro:
 
-- INT4 OmniVoice backbone:
-  - `audio_embeddings_encoder`
-  - `llm_decoder`
-  - `audio_heads_decoder`
-- Full Higgs Audio V2 tokenizer:
-  - `acoustic_encoder`
-  - `semantic_encoder`
-  - `quantizer_encoder`
-  - `higgs_decoder`
+- grabación de referencia WAV;
+- reproducción de la referencia;
+- transcripción automática local y editable;
+- clonación de voz local;
+- TTS sin referencia;
+- duración AUTO y control de velocidad;
+- inferencia protegida con Foreground Service + Wake Lock;
+- persistencia de referencia y configuración;
+- resultados de generación limitados a la sesión activa;
+- exportación de WAV a `Descargas/ORBI Voice`;
+- diagnóstico de codec Higgs;
+- aislamiento del runtime nativo de Whisper/Sherpa respecto del runtime usado por el motor de clonación.
 
-That is enough to run:
+## Arquitectura técnica actual
 
-`reference WAV -> Higgs codes -> OmniVoice iterative unmasking -> new codes -> WAV 24 kHz`
+```text
+ORBI Voice Android UI
+        |
+        +-- Reference Recorder
+        +-- Local ASR (Whisper Tiny INT8 / Sherpa-ONNX)
+        +-- Voice synthesis / cloning engine
+        |      +-- OmniVoice ONNX backbone
+        |      +-- Higgs Audio V2 tokenizer / decoder
+        |
+        +-- Audio post-processing
+        +-- Public WAV export
+```
 
-## Target phones
+La ruta de clonación actual es:
 
-Initial test order:
+```text
+reference WAV
+  -> Higgs codes
+  -> OmniVoice iterative unmasking
+  -> generated audio codes
+  -> Higgs decoder
+  -> ORBI Voice WAV 24 kHz
+```
 
-1. POCO X7 Pro, 12 GB RAM / 512 GB — first bring-up and MediaTek compatibility check.
-2. Xiaomi 14 Ultra, 16 GB / 512 GB — Snapdragon comparison.
-3. Samsung Galaxy S26 Ultra, 12 GB / 256 GB — newer Snapdragon performance comparison.
+## Dispositivo de referencia
+
+Desarrollo inicial y validación principal:
+
+- POCO X7 Pro
+- 12 GB RAM / 512 GB
+- Dimensity 8400-Ultra
+- Android arm64-v8a
+
+Otros dispositivos previstos para comparación:
+
+- Xiaomi 14 Ultra
+- Samsung Galaxy S26 Ultra
 
 ## Build
 
-Recommended: Android Studio current stable (2026).
-
 - JDK 17+
-- Android SDK 35
-- arm64-v8a device
+- Android SDK 36
 - minSdk 28
+- arm64-v8a
 
-Open this folder as an Android Studio project and run `app` on the POCO X7 Pro.
+El proyecto conserva por ahora su `applicationId`, namespace y nombres técnicos internos históricos para mantener compatibilidad de actualización y no invalidar los modelos/datos ya descargados en los dispositivos de prueba.
 
-Dependencies are pulled from Maven Central:
-- `com.microsoft.onnxruntime:onnxruntime-android:1.30.0`
-- `com.zhufucdev.hgtk:core:0.1.1`
+## Modelos
 
-> The ZIP deliberately does not bundle the Gradle wrapper JAR or multi-GB model weights.
+Los pesos no se incluyen dentro del APK. Se descargan en tiempo de ejecución al almacenamiento privado de la aplicación.
 
-## First run
+La implementación actual utiliza:
 
-1. Launch app.
-2. Check Device Readiness.
-3. Tap **Descargar / reanudar modelos**. Approx model pack is around 1.2 GB.
-4. Record 5–8 s of clean voice.
-5. Type the exact transcript in **Reference Text**.
-6. Target text: keep first smoke test short.
-7. Backend: start with **XNNPACK** on POCO X7 Pro.
-8. Steps: start at **8**; if needed try **4**.
-9. Duration: 1–2 s for first run.
-10. Confirm consent.
-11. Generate.
-12. Compare CPU / XNNPACK / NNAPI with the evidence timings shown in the app.
-
-## Important implementation notes
-
-- Model weights are downloaded at runtime into app-private storage.
-- Downloads are resumable using HTTP Range when the server supports it.
-- WAV reference path currently supports PCM16 WAV. In-app recorder produces exactly that.
-- Reference audio is resampled to 24 kHz (acoustic) and 16 kHz (semantic).
-- Iterative unmasking is ported from the ONNX conversion's Python reference:
-  codebook weights `[8,8,6,6,4,4,2,2]`, mask id 1024, 8 codebooks.
-- The decoder output is saved as 24 kHz PCM16 WAV.
-- This is an engineering spike, not a production app.
+- ONNX Runtime Android 1.30.0 para el motor de clonación;
+- Whisper Tiny multilingual INT8 + Sherpa-ONNX para ASR local;
+- runtimes nativos aislados para evitar conflictos ABI dentro de Android.
 
 ## Licensing / R&D guardrail
 
-The code used here is experimental integration code. The app does not redistribute model weights.
+ORBI Voice se encuentra todavía en etapa de I+D. El código de integración es propio del proyecto, pero los modelos y componentes de terceros conservan sus licencias correspondientes.
 
-Even if a conversion repository advertises a permissive license, **treat pretrained OmniVoice weights and derivatives as non-commercial R&D unless/until upstream weight licensing is independently cleared**. Do not ship this in a commercial ORBI product based only on the conversion repository's metadata.
+Los pesos preentrenados de OmniVoice y sus derivados deben tratarse como **uso no comercial / I+D** mientras no exista una licencia de pesos independiente que autorice expresamente su explotación comercial.
 
-## v0.1 exit criteria
+La denominación **ORBI Voice** identifica nuestro producto y experiencia de usuario; no implica propiedad sobre los modelos o proyectos upstream utilizados por la implementación actual.
 
-- Model pack completes on device.
-- Reference WAV encodes into Higgs codes.
-- At least one backend completes the full voice-cloning path.
-- Output WAV plays locally.
-- Timings are captured for POCO X7 Pro.
-- Same build can be benchmarked on Xiaomi 14 Ultra and S26 Ultra after the POCO smoke test.
+## Branding
 
-## Next phase after first success
+- Producto: **ORBI Voice**
+- Ecosistema: **ORBI Ecosystem**
+- Motor de síntesis/clonación actual: OmniVoice (referencia técnica interna)
+- ASR actual: Whisper + Sherpa-ONNX
 
-- Add QNN package/build for Snapdragon NPU (Qualcomm).
-- Add model/session staged loading to reduce peak native RAM.
-- Add cached VoiceClonePrompt/reference codes.
-- Add native audio preprocessing and better resampling.
-- Add benchmark export JSON.
-- Compare ONNX FP16 vs INT4 on Snapdragon.
-- Evaluate LiteRT conversion once the full audio-encoder path is available.
-
-## v0.2 POCO X7 Pro profile
-- Default backend: XNNPACK
-- Default inference steps: 4
-- First-device target: POCO X7 Pro 12GB/512GB, Dimensity 8400-Ultra
-- NNAPI remains an experimental second pass after XNNPACK smoke test.
+A partir de v0.10.0, la interfaz, notificaciones, documentación y artefactos de prueba se presentan como **ORBI Voice**.
