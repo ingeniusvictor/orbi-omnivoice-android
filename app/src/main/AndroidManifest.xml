@@ -22,13 +22,14 @@
         android:theme="@style/AppTheme">
 
         <service
-            android:name=".InferenceKeepAliveService"
+            android:name=".VoiceInferenceService"
             android:exported="false"
+            android:process=":inference"
             android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="local on-device neural speech inference initiated by the user" />
+                android:value="user-initiated local neural voice synthesis and voice cloning that must continue when the UI is backgrounded or the display is off" />
         </service>
 
         <service
