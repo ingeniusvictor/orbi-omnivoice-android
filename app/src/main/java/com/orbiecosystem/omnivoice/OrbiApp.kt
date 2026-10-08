@@ -15,12 +15,17 @@ class OrbiApp : Application() {
         // UI/session setup there.
         if (Application.getProcessName() != packageName) return
 
-        // Generated audio belongs only to the active UI session. Preserve a RUNNING inference so
-        // the user can leave the app, have Android recreate the UI process, and reconnect to it.
+        val prefs = getSharedPreferences("orbi_omnivoice_session", MODE_PRIVATE)
         clearTransientOutputs()
+
+        // Preserve cross-process inference state only when it belongs to the job that this UI
+        // session explicitly launched. This lets us recover from UI-process death without
+        // resurrecting unrelated/old clone results.
+        val pendingJob = prefs.getString(KEY_PENDING_JOB, null)
         val snapshot = InferenceJobStore.read(this)
-        if (snapshot?.state != InferenceJobStore.STATE_RUNNING) {
+        if (pendingJob.isNullOrBlank() || snapshot == null || snapshot.jobId != pendingJob) {
             InferenceJobStore.clear(this)
+            prefs.edit().remove(KEY_PENDING_JOB).apply()
         }
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -48,6 +53,8 @@ class OrbiApp : Application() {
     }
 
     companion object {
+        private const val KEY_PENDING_JOB = "pending_inference_job"
+
         lateinit var appContext: android.content.Context
             private set
 
