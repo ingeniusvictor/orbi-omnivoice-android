@@ -22,8 +22,8 @@ android {
         applicationId = "com.orbiecosystem.omnivoice.edgelab"
         minSdk = 28
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.9.7-isolated-asr-session-results"
+        versionCode = 21
+        versionName = "0.10.0-orbi-voice"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -77,8 +77,9 @@ android {
 }
 
 dependencies {
-    // OmniVoice keeps ORT 1.30.0. CI stages the official Sherpa AAR with its own ORT renamed;
-    // Whisper runs in the dedicated :asr process so both native runtimes are isolated.
+    // ORBI Voice currently uses the OmniVoice model stack on ORT 1.30.0. CI stages the official
+    // Sherpa AAR with its own ORT renamed; Whisper runs in the dedicated :asr process so both
+    // native runtimes remain isolated.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.30.0")
     implementation("com.zhufucdev.hgtk:core:0.1.1")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
