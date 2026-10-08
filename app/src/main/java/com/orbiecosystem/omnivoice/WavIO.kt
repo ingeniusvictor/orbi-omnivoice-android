@@ -164,7 +164,7 @@ object WavIO {
             put(MediaStore.MediaColumns.MIME_TYPE, "audio/wav")
             put(
                 MediaStore.MediaColumns.RELATIVE_PATH,
-                Environment.DIRECTORY_DOWNLOADS + "/ORBI OmniVoice"
+                Environment.DIRECTORY_DOWNLOADS + "/ORBI Voice"
             )
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
