@@ -55,7 +55,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "ORBI OmniVoice Edge Lab"
+        title = "ORBI Voice"
         setContentView(buildUi())
         showDevice()
         refreshModelState()
@@ -106,8 +106,8 @@ class MainActivity : Activity() {
         }
         scroll.addView(root)
 
-        root.addView(text("ORBI OmniVoice Edge Lab", 26f, true))
-        root.addView(text("Android ${versionName()} · Español (es) · AUTO · background guard", 14f, false))
+        root.addView(text("ORBI Voice", 26f, true))
+        root.addView(text("by ORBI Ecosystem · Android ${versionName()} · Español (es) · AUTO", 14f, false))
         root.addView(space(10))
 
         root.addView(section("1 · Device Readiness"))
@@ -188,7 +188,7 @@ class MainActivity : Activity() {
         root.addView(space(12))
 
         root.addView(section("4 · Synthesis"))
-        root.addView(text("Idioma OmniVoice: Español · es", 13f, true))
+        root.addView(text("Idioma: Español · es", 13f, true))
         targetText = edit("Texto a sintetizar", 4).apply {
             setText("Hola, soy Víctor. Esta es una prueba de clonación de voz realizada directamente desde mi teléfono.")
         }
@@ -253,7 +253,7 @@ class MainActivity : Activity() {
         root.addView(text(
             "Flujo normal: grabar → detener → ASR del WAV → revisar texto → AUTO → clonar. " +
                 "La inferencia usa un worker de aplicación y un servicio visible para seguir viva al cambiar de app. " +
-                "Las salidas WAV se publican en Descargas/ORBI OmniVoice.\n\n" +
+                "Las salidas WAV se publican en Descargas/ORBI Voice.\n\n" +
                 "TEST CODEC queda solo como diagnóstico. Licencia: laboratorio I+D; los pesos no se redistribuyen dentro del APK.",
             12f, false
         ))
@@ -566,7 +566,7 @@ class MainActivity : Activity() {
             } finally {
                 try { local.close() } catch (_: Throwable) {}
                 System.gc()
-                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI OmniVoice activo · listo")
+                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI Voice activo · listo")
             }
         }
     }
@@ -637,7 +637,7 @@ class MainActivity : Activity() {
             } finally {
                 try { local.close() } catch (_: Throwable) {}
                 System.gc()
-                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI OmniVoice activo · listo")
+                InferenceKeepAliveService.update(OrbiApp.appContext, "ORBI Voice activo · listo")
             }
         }
     }
