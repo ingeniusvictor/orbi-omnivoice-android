@@ -20,13 +20,13 @@ class InferenceKeepAliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
-        promote("ORBI OmniVoice activo · inferencia protegida en segundo plano")
+        promote("ORBI Voice activo · inferencia protegida en segundo plano")
         running = true
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val message = intent?.getStringExtra(EXTRA_MESSAGE)
-            ?: "ORBI OmniVoice activo · inferencia protegida en segundo plano"
+            ?: "ORBI Voice activo · inferencia protegida en segundo plano"
 
         val shouldHoldCpu = isInferenceMessage(message)
         if (shouldHoldCpu) {
@@ -66,7 +66,7 @@ class InferenceKeepAliveService : Service() {
         val pm = getSystemService(PowerManager::class.java)
         wakeLock = pm.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "$packageName:OmniVoiceInference"
+            "$packageName:OrbiVoiceInference"
         ).apply {
             setReferenceCounted(false)
             // Safety timeout. A normal clone on the POCO is only a few minutes, but allow enough
@@ -111,7 +111,7 @@ class InferenceKeepAliveService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "ORBI OmniVoice inference",
+            "ORBI Voice inference",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Mantiene activa la inferencia local incluso con la pantalla apagada"
@@ -133,7 +133,7 @@ class InferenceKeepAliveService : Service() {
 
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("ORBI OmniVoice Edge Lab")
+            .setContentTitle("ORBI Voice")
             .setContentText(message)
             .setContentIntent(pending)
             .setOngoing(true)
@@ -143,6 +143,7 @@ class InferenceKeepAliveService : Service() {
     }
 
     companion object {
+        // Keep the existing channel ID so Android treats this as an update instead of creating a duplicate channel.
         private const val CHANNEL_ID = "orbi_omnivoice_inference"
         private const val NOTIFICATION_ID = 2307
         private const val EXTRA_MESSAGE = "message"
