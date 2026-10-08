@@ -34,13 +34,7 @@ class VoiceInferenceService : Service() {
         if (action != ACTION_CLONE && action != ACTION_TTS) return START_NOT_STICKY
 
         if (!busy.compareAndSet(false, true)) {
-            publishState(
-                jobId = intent.getStringExtra(EXTRA_JOB_ID).orEmpty(),
-                kind = if (action == ACTION_CLONE) InferenceJobStore.KIND_CLONE else InferenceJobStore.KIND_TTS,
-                state = InferenceJobStore.STATE_ERROR,
-                message = "Ya existe una inferencia activa. Espera a que termine antes de iniciar otra.",
-                outputPath = null
-            )
+            promote("ORBI Voice · ya existe una generación activa")
             return START_NOT_STICKY
         }
 
@@ -119,7 +113,7 @@ class VoiceInferenceService : Service() {
             System.gc()
             busy.set(false)
             releaseCpuWakeLock()
-            stopForeground(STOP_FOREGROUND_DETACH)
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
