@@ -11,24 +11,24 @@ class OrbiApp : Application() {
         super.onCreate()
         appContext = applicationContext
 
-        // Whisper runs in its own :asr process. Do not execute main-process UI/session setup there.
+        // Whisper and voice inference run in dedicated processes. Do not execute main-process
+        // UI/session setup there.
         if (Application.getProcessName() != packageName) return
 
-        // Generated audio belongs only to the current UI session. Reference audio, transcript and
-        // synthesis settings intentionally remain persistent.
+        // Generated audio belongs only to the active UI session. Preserve a RUNNING inference so
+        // the user can leave the app, have Android recreate the UI process, and reconnect to it.
         clearTransientOutputs()
+        val snapshot = InferenceJobStore.read(this)
+        if (snapshot?.state != InferenceJobStore.STATE_RUNNING) {
+            InferenceJobStore.clear(this)
+        }
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
-                // A newly-created MainActivity is a new playback session: never resurrect old clone,
-                // TTS or codec outputs. commit() makes this deterministic before restoreSession().
                 clearTransientOutputs()
             }
 
-            override fun onActivityStarted(activity: Activity) {
-                InferenceKeepAliveService.start(this@OrbiApp)
-            }
-
+            override fun onActivityStarted(activity: Activity) = Unit
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
             override fun onActivityResumed(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) = Unit
@@ -51,9 +51,11 @@ class OrbiApp : Application() {
         lateinit var appContext: android.content.Context
             private set
 
+        // Kept for downloads/imports/diagnostics. Production voice generation now belongs to
+        // VoiceInferenceService in the dedicated :inference process.
         val work: ExecutorService by lazy {
             Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "orbi-omnivoice-worker").apply { priority = Thread.NORM_PRIORITY }
+                Thread(runnable, "orbi-voice-ui-worker").apply { priority = Thread.NORM_PRIORITY }
             }
         }
     }
