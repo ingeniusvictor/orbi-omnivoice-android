@@ -564,16 +564,18 @@ class MainActivity : Activity() {
         appendStatus("TTS START · servicio dedicado · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         try {
-            VoiceInferenceService.startTts(
+            val jobId = VoiceInferenceService.startTts(
                 context = this,
                 target = target,
                 backend = selectedBackend,
                 steps = nSteps,
                 seconds = estimate.seconds
             )
+            prefs.edit().putString(KEY_PENDING_JOB, jobId).apply()
             inferencePollHandler.removeCallbacks(inferencePoll)
             inferencePollHandler.postDelayed(inferencePoll, 250L)
         } catch (t: Throwable) {
+            prefs.edit().remove(KEY_PENDING_JOB).apply()
             setInferenceButtons(true)
             appendStatus("TTS START ERROR: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -619,7 +621,7 @@ class MainActivity : Activity() {
         appendStatus("CLONE START · servicio dedicado · $selectedBackend · $nSteps steps\n${generationModeLabel(estimate)}")
 
         try {
-            VoiceInferenceService.startClone(
+            val jobId = VoiceInferenceService.startClone(
                 context = this,
                 refPath = ref.absolutePath,
                 refText = refTx,
@@ -628,9 +630,11 @@ class MainActivity : Activity() {
                 steps = nSteps,
                 seconds = estimate.seconds
             )
+            prefs.edit().putString(KEY_PENDING_JOB, jobId).apply()
             inferencePollHandler.removeCallbacks(inferencePoll)
             inferencePollHandler.postDelayed(inferencePoll, 250L)
         } catch (t: Throwable) {
+            prefs.edit().remove(KEY_PENDING_JOB).apply()
             setInferenceButtons(true)
             appendStatus("CLONE START ERROR: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -638,7 +642,9 @@ class MainActivity : Activity() {
 
     private fun syncInferenceState() {
         if (!::status.isInitialized) return
+        val pendingJob = prefs.getString(KEY_PENDING_JOB, null) ?: return
         val snapshot = InferenceJobStore.read(this) ?: return
+        if (snapshot.jobId != pendingJob) return
 
         when (snapshot.state) {
             InferenceJobStore.STATE_RUNNING -> {
@@ -663,6 +669,7 @@ class MainActivity : Activity() {
                     appendStatus("BG · ${snapshot.message}")
                 }
                 lastInferenceMessage = null
+                prefs.edit().remove(KEY_PENDING_JOB).apply()
                 InferenceJobStore.clear(this)
             }
 
@@ -670,6 +677,7 @@ class MainActivity : Activity() {
                 setInferenceButtons(true)
                 appendStatus("BG · ${snapshot.message}")
                 lastInferenceMessage = null
+                prefs.edit().remove(KEY_PENDING_JOB).apply()
                 InferenceJobStore.clear(this)
             }
         }
@@ -808,6 +816,7 @@ class MainActivity : Activity() {
         private const val KEY_DURATION = "duration"
         private const val KEY_SPEED = "speed"
         private const val KEY_STATUS = "status"
+        private const val KEY_PENDING_JOB = "pending_inference_job"
         private const val INFERENCE_POLL_MS = 750L
     }
 }
